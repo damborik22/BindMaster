@@ -200,8 +200,12 @@ STEP=1
 # Runs before any refold engine so --soluprot-filter can drop sub-threshold
 # sequences and save GPU time. The score lands in the report either way.
 if [[ $SKIP_SOLUPROT -eq 0 ]]; then
-    echo "[step ${STEP}/${N_STEPS}] SoluProt screen     (conda env: ${SOLUPROT_ENV}, threshold: ${SOLUPROT_THRESHOLD})..."
-    conda run -n "${SOLUPROT_ENV}" binder-compare filter-soluprot \
+    echo "[step ${STEP}/${N_STEPS}] SoluProt screen     (model env: ${SOLUPROT_ENV}, threshold: ${SOLUPROT_THRESHOLD})..."
+    # binder-compare (the CLI) lives in the py3.10 binder-eval env; it shells into
+    # the py3.7 SoluProt model env (${SOLUPROT_ENV}) to run soluprot.py. Resolve that
+    # interpreter and hand it to the runner via SOLUPROT_PYTHON.
+    SOLUPROT_PY="$(conda run -n "${SOLUPROT_ENV}" python -c 'import sys; print(sys.executable)' 2>/dev/null || true)"
+    SOLUPROT_PYTHON="${SOLUPROT_PY}" conda run -n binder-eval binder-compare filter-soluprot \
         --sequences "$SEQUENCES" \
         -o          "$SOLUPROT_CSV" \
         --threshold "$SOLUPROT_THRESHOLD"

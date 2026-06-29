@@ -2261,7 +2261,10 @@ ESMFOLD2EOF
 # Where SoluProt's distribution lands. Kept inside Evaluator/tools/ so the
 # Python runner's default _resolve_scripts_path() finds it without env vars.
 SOLUPROT_DIR="${EVALUATOR_DIR}/tools/soluprot"
-SOLUPROT_ZIP_URL="https://loschmidt.chemi.muni.cz/soluprot/api/download/soluprot.zip"
+# The Loschmidt server serves downloads via a `?f=` query param (the older
+# /api/download/ path now 404s). soluprot.zip carries soluprot.py + data/
+# (model pickles + the E. coli reference DB) — everything inference needs.
+SOLUPROT_ZIP_URL="https://loschmidt.chemi.muni.cz/soluprot/?f=soluprot.zip"
 
 install_soluprot() {
     print_step "Installing SoluProt 1.0 solubility screen (binder-eval-soluprot env)"
@@ -2348,15 +2351,19 @@ install_soluprot() {
         echo ""
     fi
 
-    # 5. Make `binder-compare filter-soluprot` available in the env.
-    run_logged "Installing binder-compare into binder-eval-soluprot" \
-        "${CONDA_CMD}" run -n binder-eval-soluprot pip install -q -e "${EVALUATOR_DIR}[report]" \
-        || { print_fail "Failed to install binder-compare into binder-eval-soluprot"; return 1; }
-
-    # 6. Smoke test the CLI (does NOT actually score anything; just exercises argparse).
-    smoke_test "binder-compare filter-soluprot --help" \
-        "${CONDA_CMD}" run -n binder-eval-soluprot binder-compare filter-soluprot --help \
-        || return 1
+    # 5. The `binder-compare filter-soluprot` CLI runs in the py3.10 `binder-eval`
+    #    env — NOT here. binder-comparison is requires-python>=3.10 (numpy>=1.24),
+    #    so it cannot be installed into this py3.7 env; the CLI shells into
+    #    binder-eval-soluprot only to run soluprot.py. Just confirm the evaluator
+    #    env already provides the CLI (non-fatal: the model env is independently usable).
+    if env_exists binder-eval \
+        && "${CONDA_CMD}" run -n binder-eval binder-compare filter-soluprot --help >/dev/null 2>&1; then
+        print_ok "binder-compare filter-soluprot available in the binder-eval env"
+    else
+        print_warn "binder-compare (filter-soluprot) not found in the binder-eval env."
+        print_warn "  Install the evaluator to get the CLI:  bindmaster install --tool evaluator"
+        print_warn "  (SoluProt's model env is ready; the CLI lives in binder-eval and shells into it.)"
+    fi
 
     # 7. Shortcut
     print_step "Installing soluprot shortcut"
@@ -2377,24 +2384,25 @@ _write_soluprot_shortcut() {
     mkdir -p "${SHORTCUTS_DIR}"
     {
         echo "#!/bin/bash"
-        echo "# BindMaster SoluProt shortcut — runs 'binder-compare filter-soluprot ...' in the"
-        echo "# binder-eval-soluprot env. With no args: opens an interactive env shell."
+        echo "# BindMaster SoluProt shortcut — runs 'binder-compare filter-soluprot ...'."
+        echo "# The CLI runs in the py3.10 binder-eval env and shells into the py3.7"
+        echo "# binder-eval-soluprot env (via SOLUPROT_PYTHON) to run soluprot.py."
         echo ""
         echo "CONDA_CMD=\"${CONDA_CMD}\""
         echo "export SOLUPROT_HOME=\"${SOLUPROT_DIR}\""
+        echo "export SOLUPROT_PYTHON=\"\$(\"\${CONDA_CMD}\" run -n binder-eval-soluprot python -c 'import sys; print(sys.executable)' 2>/dev/null)\""
     } > "${SHORTCUTS_DIR}/soluprot"
     cat >> "${SHORTCUTS_DIR}/soluprot" << 'SOLUPROTEOF'
 
 if [ "$#" -eq 0 ]; then
-    echo "SoluProt env (binder-eval-soluprot) activated."
+    echo "SoluProt screen — binder-compare filter-soluprot"
+    echo "  (CLI runs in binder-eval; the py3.7 model runs in binder-eval-soluprot)."
     echo "Usage:"
-    echo "  binder-compare filter-soluprot --sequences seqs.fasta -o soluprot.csv [--threshold 0.5]"
+    echo "  soluprot --sequences seqs.fasta -o soluprot.csv [--threshold 0.5]"
     echo "  (Default threshold: 0.5 -- the SoluProt paper value.)"
-    echo ""
-    exec "${CONDA_CMD}" run --live-stream -n binder-eval-soluprot bash
-else
-    exec "${CONDA_CMD}" run --live-stream -n binder-eval-soluprot binder-compare filter-soluprot "$@"
+    exit 0
 fi
+exec "${CONDA_CMD}" run --live-stream -n binder-eval binder-compare filter-soluprot "$@"
 SOLUPROTEOF
     chmod +x "${SHORTCUTS_DIR}/soluprot"
 }

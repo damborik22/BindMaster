@@ -7,7 +7,7 @@ Subcommands:
     refold-protenix  — refold with Protenix v0.5.0 (run in bindmaster_pxdesign env)
     refold-af3       — refold with AlphaFold 3 v3.0.2 (run in binder-eval-af3 env; needs >=100 GB GPU memory)
     refold-esmfold2  — refold with ESMFold2 (biohub; run in binder-eval-esmfold2 env)
-    filter-soluprot  — score sequence solubility with SoluProt 1.0 (run in binder-eval-soluprot env; no GPU)
+    filter-soluprot  — score sequence solubility with SoluProt 1.0 (run in binder-eval; shells into binder-eval-soluprot; no GPU)
     report           — merge, normalise, generate HTML report
     run              — full pipeline orchestrator
     validate         — sanity-check input sequences before refolding

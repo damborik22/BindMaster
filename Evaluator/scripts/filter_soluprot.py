@@ -1,12 +1,13 @@
 """Standalone SoluProt batch scorer.
 
-Run inside the ``binder-eval-soluprot`` conda env. Functionally equivalent to
+Run inside the py3.10 ``binder-eval`` conda env (it shells into the py3.7
+``binder-eval-soluprot`` env to run soluprot.py). Functionally equivalent to
 ``binder-compare filter-soluprot`` — kept in scripts/ to match the existing
 pattern (refold_boltz2.py, refold_protenix.py, refold_af3.py, refold_esmfold2.py
 all have a script form alongside the CLI form).
 
 Usage:
-    conda run -n binder-eval-soluprot python Evaluator/scripts/filter_soluprot.py \\
+    conda run -n binder-eval python Evaluator/scripts/filter_soluprot.py \\
         --sequences sequences.fasta \\
         --output    soluprot_results.csv \\
         [--threshold 0.5] \\

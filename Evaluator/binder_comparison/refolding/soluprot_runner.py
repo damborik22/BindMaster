@@ -1,9 +1,11 @@
 """SoluProt 1.0 wrapper — sequence-only solubility screen.
 
-Wraps the standalone SoluProt distribution (Hon et al. 2021) by
-invoking its `soluprot.py` entry script inside the
-``binder-eval-soluprot`` conda env, then collecting the per-sequence
-probability scores into a CSV.
+Wraps the standalone SoluProt distribution (Hon et al. 2021) by shelling
+into the py3.7 ``binder-eval-soluprot`` conda env to run its `soluprot.py`
+entry script, then collecting the per-sequence probability scores into a
+CSV. The CLI that calls this (``binder-compare filter-soluprot``) runs in
+the py3.10 ``binder-eval`` env — binder-comparison is py>=3.10, so it cannot
+import or run soluprot.py in-process; it shells out via ``$SOLUPROT_PYTHON``.
 
 SoluProt is NOT a refolding engine — it produces no structure, no PAE,
 no pLDDT. It outputs a single probability per sequence indicating how
@@ -22,6 +24,7 @@ from __future__ import annotations
 
 import csv
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -74,36 +77,51 @@ def run_soluprot_filter(
     # and read the scores back keyed by position.
     fasta_tmp = output_csv.with_suffix(".soluprot_in.fasta")
     score_tmp = output_csv.with_suffix(".soluprot_out.csv")
+    work_tmp = output_csv.with_suffix(".soluprot_work")
     _write_fasta(sequences, fasta_tmp)
 
     try:
+        # soluprot.py's CLI is --i_fa/--o_csv/--tmp_dir. It auto-selects the full
+        # (with-TMHMM) model unless --no_tmhmm, and resolves tmhmm/usearch from PATH
+        # or an explicit flag. We run it under the py3.7 SoluProt interpreter, since
+        # binder-comparison itself is py>=3.10 and cannot run soluprot.py in-process.
         cmd = [
-            "python",
+            _soluprot_python(),
             str(soluprot_entry),
-            "--input",
+            "--i_fa",
             str(fasta_tmp),
-            "--output",
+            "--o_csv",
             str(score_tmp),
+            "--tmp_dir",
+            str(work_tmp),
         ]
-        # SoluProt's CWD matters because its data files (training-set features,
-        # etc.) are looked up relative to the script.
+        if shutil.which("tmhmm") is None:
+            cmd.append("--no_tmhmm")
+        usearch = _resolve_usearch(soluprot_dir)
+        if usearch is not None:
+            cmd += ["--usearch", str(usearch)]
+
+        # SoluProt's CWD matters because its data files (model pickles, the E. coli
+        # reference DB) are looked up relative to the script.
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
         print(f"[soluprot] running: {' '.join(cmd)}  (cwd={soluprot_dir})")
         proc = subprocess.run(cmd, cwd=soluprot_dir, env=env, capture_output=True, text=True, check=False)
-        if proc.returncode != 0:
+        # soluprot.py can exit 0 without writing the CSV on a tool failure, so a
+        # missing output file (not just the return code) is the real failure signal.
+        if proc.returncode != 0 or not score_tmp.exists():
             raise RuntimeError(
-                f"SoluProt exited with code {proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+                f"SoluProt failed (exit {proc.returncode}).\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
             )
 
         scores = _parse_scores(score_tmp, n_expected=len(sequences))
     finally:
         # Keep the intermediate files if the run failed (helpful for debugging),
         # clean them up on success.
-        if fasta_tmp.exists() and not _keep_intermediates():
+        if not _keep_intermediates():
             fasta_tmp.unlink(missing_ok=True)
-        if score_tmp.exists() and not _keep_intermediates():
             score_tmp.unlink(missing_ok=True)
+            shutil.rmtree(work_tmp, ignore_errors=True)
 
     _write_csv(
         output_csv,
@@ -138,6 +156,38 @@ def _resolve_scripts_path(override: str | Path | None) -> Path:
         "SoluProt is not installed. Run `bindmaster install --tool soluprot`, "
         "set $SOLUPROT_HOME, or pass --scripts-path."
     )
+
+
+def _soluprot_python() -> str:
+    """Interpreter for soluprot.py — the py3.7 ``binder-eval-soluprot`` env.
+
+    binder-comparison is py>=3.10, so this runner (imported by the py3.10
+    ``binder-compare`` CLI) shells into the py3.7 SoluProt env to run soluprot.py
+    rather than importing it. Resolution order: ``$SOLUPROT_PYTHON``, then the
+    conda env's python, then bare ``python`` as a last resort.
+    """
+    env = os.environ.get("SOLUPROT_PYTHON")
+    if env and Path(env).exists():
+        return env
+    cand = Path.home() / "miniforge3" / "envs" / "binder-eval-soluprot" / "bin" / "python"
+    if cand.exists():
+        return str(cand)
+    return "python"
+
+
+def _resolve_usearch(soluprot_dir: Path) -> Path | None:
+    """USEARCH binary for the E. coli identity feature: ``$SOLUPROT_USEARCH``,
+    else ``<soluprot_dir>/usearch`` (where the installer stages it), else None
+    (soluprot.py then falls back to a ``usearch`` on PATH)."""
+    env = os.environ.get("SOLUPROT_USEARCH")
+    if env:
+        p = Path(env).expanduser()
+        if p.exists():
+            return p
+    for cand in (soluprot_dir / "usearch", soluprot_dir.parent / "usearch"):
+        if cand.exists():
+            return cand
+    return None
 
 
 def _find_entry_script(soluprot_dir: Path) -> Path:

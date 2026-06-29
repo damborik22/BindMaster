@@ -3,10 +3,11 @@
 Score every binder in a FASTA with SoluProt 1.0 (Hon et al. 2021) and
 write a per-sequence CSV. SoluProt is a sequence-only solubility
 screen — no GPU, no refolding, no structural output. Run inside the
-``binder-eval-soluprot`` conda env.
+py3.10 ``binder-eval`` conda env; it shells into the py3.7
+``binder-eval-soluprot`` env (via $SOLUPROT_PYTHON) to run soluprot.py.
 
 Usage:
-    conda run -n binder-eval-soluprot binder-compare filter-soluprot \\
+    conda run -n binder-eval binder-compare filter-soluprot \\
         --sequences sequences.fasta \\
         --output    soluprot_results.csv \\
         [--threshold 0.5] \\
@@ -45,7 +46,7 @@ def run(args: argparse.Namespace) -> None:
 def add_parser(subparsers) -> None:
     p = subparsers.add_parser(
         "filter-soluprot",
-        help="Score sequences with SoluProt (sequence-only solubility screen; run in 'binder-eval-soluprot' env).",
+        help="Score sequences with SoluProt (sequence-only solubility screen; run in 'binder-eval' env).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=__doc__,
     )
