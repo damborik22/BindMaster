@@ -64,6 +64,36 @@ import pandas as pd
 N_NATIVE_PER_TOOL = 20
 N_REFOLD = 50
 
+# How each tool is written for a human. The keys the pipeline joins on
+# (`source_tool`, `--tool-csv` names) stay lowercase everywhere — this is display
+# only, applied at render time, so nothing downstream has to know about it.
+TOOL_DISPLAY_NAMES = {
+    "bindcraft": "BindCraft",
+    "boltzgen": "BoltzGen",
+    "mosaic": "Mosaic",
+    "proteina_complexa": "Proteina-Complexa",
+    "pxdesign": "PXDesign",
+    "protein_hunter": "Protein Hunter",
+    "rfd3": "RFDiffusion3",
+}
+
+
+def display_tool_name(tool: str) -> str:
+    """Human-facing name for a tool key; unknown tools pass through unchanged.
+
+    A variant keeps its qualifier so the two BoltzGen modes stay distinguishable:
+    ``boltzgen_protein`` → ``BoltzGen (protein)``, ``boltzgen_nano`` →
+    ``BoltzGen (nano)``.
+    """
+    t = str(tool or "").strip()
+    if t in TOOL_DISPLAY_NAMES:
+        return TOOL_DISPLAY_NAMES[t]
+    for base, name in TOOL_DISPLAY_NAMES.items():
+        if t.startswith(base + "_"):
+            return f"{name} ({t[len(base) + 1 :].replace('_', ' ')})"
+    return t
+
+
 # Native blocks are emitted in this order; the refold block always comes last.
 CANONICAL_TOOL_ORDER = [
     "bindcraft",
@@ -257,7 +287,7 @@ def build_candidates_table(
             rows.append(
                 {
                     "Set": set_label,
-                    "Method": tool,
+                    "Method": display_tool_name(tool),
                     # THIS sequence's own native rank — never a sibling's.
                     "Ranking native": seq_native_rank[tool].get(key, ""),
                     # THIS design's own refold rank — never a sibling's.
@@ -284,7 +314,7 @@ def build_candidates_table(
         rows.append(
             {
                 "Set": set_label,
-                "Method": tool,
+                "Method": display_tool_name(tool),
                 "Ranking native": native_rank,
                 # the frame's own rank, not the row position, so both blocks
                 # quote the same number for the same design

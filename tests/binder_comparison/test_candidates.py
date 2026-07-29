@@ -16,6 +16,7 @@ pd = pytest.importorskip("pandas")
 from binder_comparison.comparison.candidates import (  # noqa: E402
     build_candidates_table,
     collapse_native_df,
+    display_tool_name,
     order_tools,
 )
 
@@ -116,20 +117,20 @@ def test_build_candidates_full(tmp_path):
     sets = list(dict.fromkeys(t["Set"]))
     assert sets == ["Native top-20", "Refold top-30"]  # this call passes n_refold=30 explicitly
     native_order = list(dict.fromkeys(t[t["Set"].str.startswith("Native")]["Method"]))
-    assert native_order == ["bindcraft", "mosaic"]
+    assert native_order == ["BindCraft", "Mosaic"]  # display names, not join keys
 
     # bindcraft native block reproduces the TOOL's list: XXXX dropped (never
     # refolded), but BOTH bc_t1 siblings kept and numbered 1,2,3 with no holes.
     # Backbone collapse is for OUR shortlist only — it must not rewrite the
     # tool's own top-N (doing so renumbered BindCraft's as 1,2,3,4,7,8,11,…).
-    bc_nat = t[(t["Set"].str.startswith("Native")) & (t["Method"] == "bindcraft")]
+    bc_nat = t[(t["Set"].str.startswith("Native")) & (t["Method"] == "BindCraft")]
     assert list(bc_nat["Primary sequence"]) == ["AAAB", "AAAA", "CCCC"]
     assert list(bc_nat["Ranking native"]) == [1, 2, 3]
 
     # THE POINT: the refold block's bc_t1 row holds AAAA, so it must print AAAA's
     # OWN native rank (2) — not AAAB's 1, which is a different sequence.
     refold = t[t["Set"].str.startswith("Refold")]
-    bc_ref = refold[refold["Method"] == "bindcraft"]
+    bc_ref = refold[refold["Method"] == "BindCraft"]
     bc_t1_row = bc_ref[bc_ref["Primary sequence"] == "AAAA"]
     assert list(bc_t1_row["Ranking native"]) == [2]
 
@@ -211,3 +212,34 @@ def test_refold_only_when_no_tool_csvs():
     assert (t["Ranking native"].astype(str).str.strip() == "").all()
     other = t.drop(columns=["Ranking native"])
     assert int(other.map(lambda x: str(x).strip() == "").to_numpy().sum()) == 0
+
+
+def test_tool_names_are_human_readable():
+    """The Method column is for a reader, so it must not print raw keys.
+
+    Join keys (`source_tool`, `--tool-csv` names) stay lowercase; this is display
+    only. Variants keep their qualifier so the two BoltzGen modes stay apart, and
+    an unknown tool passes through rather than being mangled.
+    """
+    assert display_tool_name("protein_hunter") == "Protein Hunter"
+    assert display_tool_name("rfd3") == "RFDiffusion3"
+    assert display_tool_name("proteina_complexa") == "Proteina-Complexa"
+    assert display_tool_name("pxdesign") == "PXDesign"
+    assert display_tool_name("boltzgen") == "BoltzGen"
+    assert display_tool_name("bindcraft") == "BindCraft"
+    assert display_tool_name("mosaic") == "Mosaic"
+    # variants keep their qualifier
+    assert display_tool_name("boltzgen_protein") == "BoltzGen (protein)"
+    assert display_tool_name("boltzgen_nano") == "BoltzGen (nano)"
+    # unknown / empty pass through untouched
+    assert display_tool_name("some_new_tool") == "some_new_tool"
+    assert display_tool_name("") == ""
+
+
+def test_candidates_method_column_uses_display_names(tmp_path):
+    full = _full_df()
+    disp = _df_display(full)
+    tool_csvs = {"bindcraft": _write(tmp_path, "bc.csv", pd.DataFrame({"Sequence": ["AAAB", "CCCC"]}))}
+    t = build_candidates_table(full, disp, tool_csvs, n_native=20, n_refold=30)
+    assert "bindcraft" not in set(t["Method"])
+    assert "BindCraft" in set(t["Method"])
