@@ -362,6 +362,14 @@ def run(args: argparse.Namespace) -> None:
         )
         df_display = df[df["is_representative"]].reset_index(drop=True)
         df_display["rank"] = range(1, len(df_display) + 1)
+        # ONE numbering space. `rank` counts DISTINCT designs, so a collapsed
+        # sibling carries no rank — it is an alternative sequence for a backbone
+        # that is already ranked, and design_group / is_representative say which.
+        # Without this, metrics.csv kept a 1..len(df) rank over every refolded
+        # sequence while every shortlist quoted the dense one: the same column
+        # name meant two things, and "rank 26" named a different design in each
+        # file (5 of 30 top-30 rows on the CALCA top-50 pool).
+        df["rank"] = df["binder_id"].map(dict(zip(df_display["binder_id"], df_display["rank"]))).astype("Int64")
     else:
         df_display = df
 

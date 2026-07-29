@@ -138,6 +138,26 @@ def test_build_candidates_full(tmp_path):
     assert all(isinstance(v, int) for v in t["Length"])
 
 
+def test_warns_when_a_native_csv_only_partly_covers_the_pool(tmp_path):
+    """A native CSV missing some pool designs leaves blank native ranks — say so.
+
+    collapse_native_df already shouts when a tool's CSV matches NOTHING in the
+    pool. The partial case was silent: on the 2VDY combined pool three snapshots
+    covered 47–48 of their tool's 50 designs, so 7 designs had no native rank and
+    two of them surfaced as blank cells in the refold top-50 with no explanation.
+    """
+    full = _full_df()
+    disp = _df_display(full)
+    # bindcraft's CSV covers backbone bc_t1 but omits CCCC (bc_t2), which IS in
+    # the refold pool — so bc_t2's refold row can resolve no native rank.
+    tool_csvs = {"bindcraft": _write(tmp_path, "bc.csv", pd.DataFrame({"Sequence": ["AAAB"]}))}
+    with pytest.warns(UserWarning, match="native rank"):
+        t = build_candidates_table(full, disp, tool_csvs, n_native=20, n_refold=30)
+    # the unresolvable rows are still emitted, just with a blank native rank
+    refold = t[t["Set"].str.startswith("Refold")]
+    assert (refold["Ranking native"] == "").any()
+
+
 def test_native_row_is_one_real_design(tmp_path):
     """Every metric in a native row must belong to the design it names.
 

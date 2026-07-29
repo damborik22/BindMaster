@@ -257,11 +257,14 @@ def build_candidates_table(
                 }
             )
 
-    # --- refold block (cross-engine two-stage ranking), LAST ---
+    # --- refold block (cross-engine ranking), LAST ---
     set_label = f"Refold top-{n_refold}"
+    unresolved: dict[str, int] = {}
     for refold_rank, row in enumerate(df_display.head(n_refold).to_dict("records"), start=1):
         tool = row.get("source_tool", "")
         native_rank = grp_native_rank.get(tool, {}).get(row.get("design_group", ""), "")
+        if native_rank == "" and tool in grp_native_rank:
+            unresolved[tool] = unresolved.get(tool, 0) + 1
         rows.append(
             {
                 "Set": set_label,
@@ -278,4 +281,12 @@ def build_candidates_table(
             }
         )
 
+    if unresolved:
+        detail = ", ".join(f"{t}: {n}" for t, n in sorted(unresolved.items()))
+        warnings.warn(
+            f"[candidates] no native rank for {sum(unresolved.values())} of the top-{n_refold} "
+            f"refold designs ({detail}) — those designs are in the refold pool but absent from "
+            "their tool's native CSV, so the cell is left blank. The snapshot predates the pool "
+            "(tool re-run, or the pool was assembled from a different selection)."
+        )
     return pd.DataFrame(rows, columns=CANDIDATES_COLUMNS)
