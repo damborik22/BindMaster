@@ -235,7 +235,12 @@ def build_candidates_table(
         full_native = collapse_native_df(tool_csvs[tool], seq_to_group, top_n=None, collapse=False)
         if full_native.empty:
             continue
-        seq_native_rank[tool] = {k: i for i, k in enumerate(full_native["_seq_key"].tolist(), start=1)}
+        # first occurrence wins: a sequence listed twice in a native CSV keeps its
+        # BEST rank, not whichever copy happens to come last.
+        _ranks: dict[str, int] = {}
+        for _i, _k in enumerate(full_native["_seq_key"].tolist(), start=1):
+            _ranks.setdefault(_k, _i)
+        seq_native_rank[tool] = _ranks
         # The block itself still shows one row per backbone (siblings of a design
         # we already list add nothing), so its numbers skip — same as the refold
         # block's do, and for the same reason.
