@@ -118,13 +118,13 @@ def test_build_candidates_full(tmp_path):
     native_order = list(dict.fromkeys(t[t["Set"].str.startswith("Native")]["Method"]))
     assert native_order == ["bindcraft", "mosaic"]
 
-    # bindcraft native block: XXXX dropped (not refolded), bc_t1 shown once via
-    # the TOOL's pick (AAAB) — our refold must not swap it for AAAA. Native rank
-    # is per SEQUENCE, so the block skips 2: that is AAAA, a sibling of a design
-    # already listed.
+    # bindcraft native block reproduces the TOOL's list: XXXX dropped (never
+    # refolded), but BOTH bc_t1 siblings kept and numbered 1,2,3 with no holes.
+    # Backbone collapse is for OUR shortlist only — it must not rewrite the
+    # tool's own top-N (doing so renumbered BindCraft's as 1,2,3,4,7,8,11,…).
     bc_nat = t[(t["Set"].str.startswith("Native")) & (t["Method"] == "bindcraft")]
-    assert list(bc_nat["Primary sequence"]) == ["AAAB", "CCCC"]
-    assert list(bc_nat["Ranking native"]) == [1, 3]
+    assert list(bc_nat["Primary sequence"]) == ["AAAB", "AAAA", "CCCC"]
+    assert list(bc_nat["Ranking native"]) == [1, 2, 3]
 
     # THE POINT: the refold block's bc_t1 row holds AAAA, so it must print AAAA's
     # OWN native rank (2) — not AAAB's 1, which is a different sequence.

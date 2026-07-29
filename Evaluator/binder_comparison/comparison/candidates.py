@@ -18,34 +18,38 @@ Two correctness rules are baked in here so the file is right straight out of
      step: a design absent from the refold pool has no Mean_ipTM to show. Every
      native-block row is therefore a refolded design (no blank-metric rows,
      barring a design whose engines all failed to score).
-  2. Backbone collapse — a tool's native CSV may list many sequences for one
-     backbone (BindCraft MPNN siblings, Protein-Hunter cycles); we keep one row
-     per ``design_group`` so every row is a distinct design. Native rank is
-     dense over the surviving distinct backbones.
+  2. Backbone collapse — **REFOLD block only.** A tool's native CSV may list many
+     sequences for one backbone (BindCraft MPNN siblings, Protein-Hunter cycles).
+     Our shortlist keeps one row per ``design_group`` so it does not spend slots
+     on several sequences of one design. It must NOT touch the tool's own top-N:
+     collapsing there renumbered BindCraft's native list as 1,2,3,4,7,8,11,…,
+     which is not its ranking.
 
   3. One row = one real design, and **the native block is the TOOL's view** — our
-     refold never picks which sibling it shows, nor reorders it. A backbone's
-     best-NATIVE sibling and our refold REPRESENTATIVE are often different
-     sequences; the native block shows the tool's pick and quotes *that
-     sequence's own* refold rank. Both halves of the row therefore describe the
-     same molecule.
+     refold never picks which sibling it shows, nor reorders it. Every cell in a
+     row describes the sequence named in that row.
 
-     Getting this wrong in either direction has already shipped. Printing the
-     native sibling's ipTM beside the representative's rank made rows describing
-     no actual design (10 of 140 on the CALCA top-50 pool: bindcraft native #4
-     showed mpnn3's ipTM 0.917, true rank 26, next to mpnn4's rank 22, ipTM
-     0.921). Rendering the row *from* the representative instead fixed the
-     arithmetic but let our ranking overwrite the tool's own #1 — BindCraft ranks
-     ``…_l186_s671234_mpnn5`` first, and the table said ``_mpnn2``.
+     Getting this wrong has shipped three times. Printing the native sibling's
+     ipTM beside the representative's rank made rows describing no actual design
+     (10 of 140 on the CALCA top-50 pool). Rendering the row *from* the
+     representative instead fixed the arithmetic but let our ranking overwrite
+     the tool's own #1 (BindCraft ranks ``…_l186_s671234_mpnn5`` first; the table
+     said ``_mpnn2``). Taking "Ranking native" from ``design_group`` printed the
+     best-native sibling's number on our rank-22 row, which holds a different
+     sequence (``_mpnn4``, native 10) — it read 4, ``_mpnn3``'s.
 
-This works because ``rank`` ranks **designs, not sequences** (see
-``cli/report.py``): it is dense over distinct designs and a backbone's siblings
-share it. So a native row always has a rank to quote — even for a sibling the
-shortlist collapsed — and it is the same number the refold block prints for that
-design. The shortlist therefore reads 1..N with no gaps and no blank
-cross-references. The refold block's "Ranking native" is looked up by
-``design_group`` so a representative that is a *different* sibling than the
-native-best one still resolves to its backbone's native rank.
+Both rankings count **sequences**, and every cell quotes the rank of the sequence
+in its own row — looked up by sequence, never by ``design_group``. "Ranking
+native" is that sequence's place in its tool's ranking; "Ranking refolded" is its
+place in ours (``rank``, which ``cli/report.py`` does not renumber).
+
+Consequence: the NATIVE blocks read 1..N with no holes, because they reproduce
+the tool's list untouched. The REFOLD block skips a number wherever a sibling was
+collapsed out of our shortlist — that skip is the whole point of the collapse and
+the skipped design is still in its tool's native block and in ``metrics.csv``.
+The two can disagree about which sibling is better and that is real signal:
+BindCraft rates ``l127_s975277_mpnn3`` 4th (our rank 26) while our engines prefer
+its sibling ``_mpnn4`` (our rank 22, native 10).
 """
 
 from __future__ import annotations
@@ -241,10 +245,12 @@ def build_candidates_table(
         for _i, _k in enumerate(full_native["_seq_key"].tolist(), start=1):
             _ranks.setdefault(_k, _i)
         seq_native_rank[tool] = _ranks
-        # The block itself still shows one row per backbone (siblings of a design
-        # we already list add nothing), so its numbers skip — same as the refold
-        # block's do, and for the same reason.
-        survivors = full_native[~full_native["_design_group"].duplicated(keep="first")].reset_index(drop=True)
+        # The native block is the TOOL's list, reproduced as the tool ordered it:
+        # NOT collapsed. Backbone collapse exists so *our* shortlist does not
+        # spend slots on several MPNN sequences of one design — it has no
+        # business rewriting the tool's own top-N. Collapsing here renumbered
+        # BindCraft's top-20 as 1,2,3,4,7,8,11,… , which is not its ranking.
+        survivors = full_native
         set_label = f"Native top-{n_native}"
         for key in survivors["_seq_key"].head(n_native).tolist():
             m = meta.get(key, {})
