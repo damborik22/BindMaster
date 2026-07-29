@@ -53,9 +53,16 @@ def _full_df():
 
 
 def _df_display(full):
-    # Like cli/report.py: collapse to representatives but do NOT renumber, so
-    # every sequence keeps its own rank and the shortlist skips the collapsed one.
-    return full[full["is_representative"]].sort_values("rank").reset_index(drop=True).copy()
+    """Like cli/report.py: rank DESIGNS, not sequences.
+
+    Dense 1..n over distinct designs, and every sibling carries its backbone's
+    rank — so the shortlist has no gaps and no native row is left without a
+    cross-reference. Mutates `full` the way report.py mutates `df`.
+    """
+    disp = full[full["is_representative"]].sort_values("rank").reset_index(drop=True).copy()
+    disp["rank"] = range(1, len(disp) + 1)
+    full["rank"] = full["design_group"].map(dict(zip(disp["design_group"], disp["rank"], strict=False)))
+    return disp
 
 
 def _write(tmp_path, name, df):
@@ -128,12 +135,12 @@ def test_build_candidates_full(tmp_path):
     bc_t1_row = bc_ref[bc_ref["Primary sequence"] == "AAAA"]
     assert list(bc_t1_row["Ranking native"]) == [1]
 
-    # Each row quotes ITS OWN design's rank: the refold block's AAAA shows 2, and
-    # the native row for AAAB shows 3 — AAAB's own rank, not its backbone's.
+    # Siblings share their DESIGN's rank, so the native row for AAAB quotes the
+    # same 2 the refold block prints for its representative AAAA — and the
+    # shortlist runs 1..n with no gaps.
     assert list(bc_t1_row["Ranking refolded"]) == [2]
-    assert list(bc_nat[bc_nat["Primary sequence"] == "AAAB"]["Ranking refolded"]) == [3]
-    # The shortlist therefore skips 3 (AAAB was collapsed away).
-    assert sorted(refold["Ranking refolded"]) == [1, 2, 4]
+    assert list(bc_nat[bc_nat["Primary sequence"] == "AAAB"]["Ranking refolded"]) == [2]
+    assert sorted(refold["Ranking refolded"]) == [1, 2, 3]
 
     # Length is a plain int, not a float.
     assert all(isinstance(v, int) for v in t["Length"])
@@ -179,18 +186,22 @@ def test_native_row_is_one_real_design(tmp_path):
 
     nat = t[t["Set"].str.startswith("Native")]
     by_seq = full.set_index("sequence")
-    # every refolded sequence keeps a rank, collapsed siblings included
-    rank_to_seq = dict(zip(full["rank"], full["sequence"], strict=False))
+    # a rank identifies a DESIGN, so it must resolve to this row's backbone
+    rank_to_group = dict(zip(full["rank"], full["design_group"], strict=False))
+    seq_to_group = dict(zip(full["sequence"], full["design_group"], strict=False))
     for _, row in nat.iterrows():
         seq = row["Primary sequence"]
         shown_rank = row["Ranking refolded"]
         # the row's own metrics
         assert row["Mean_ipTM"] == round(by_seq.loc[seq, "consensus_iptm_mean"], 3)
         assert row["Length"] == by_seq.loc[seq, "binder_length"]
-        # …and the rank it prints must be THIS sequence's rank, not a sibling's
-        assert rank_to_seq[shown_rank] == seq, (
-            f"native row names {seq} but prints rank {shown_rank}, which belongs to {rank_to_seq[shown_rank]}"
+        # …and the rank it prints must belong to THIS design, not another one
+        assert rank_to_group[shown_rank] == seq_to_group[seq], (
+            f"native row names {seq} (design {seq_to_group[seq]}) but prints rank "
+            f"{shown_rank}, which belongs to design {rank_to_group[shown_rank]}"
         )
+    # no native row may be left without a cross-reference
+    assert not (nat["Ranking refolded"].astype(str).str.strip() == "").any()
 
 
 def test_refold_only_when_no_tool_csvs():

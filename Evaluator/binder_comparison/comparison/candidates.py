@@ -38,11 +38,12 @@ Two correctness rules are baked in here so the file is right straight out of
      arithmetic but let our ranking overwrite the tool's own #1 — BindCraft ranks
      ``…_l186_s671234_mpnn5`` first, and the table said ``_mpnn2``.
 
-This works only because ``rank`` is never renumbered after collapsing (see
-``cli/report.py``), so every refolded sequence keeps a rank and a collapsed
-sibling can still be quoted. The refold block quotes each row's own ``rank``
-too; it therefore skips numbers where a sibling was collapsed, and a missing
-number means exactly that. The refold block's "Ranking native" is looked up by
+This works because ``rank`` ranks **designs, not sequences** (see
+``cli/report.py``): it is dense over distinct designs and a backbone's siblings
+share it. So a native row always has a rank to quote — even for a sibling the
+shortlist collapsed — and it is the same number the refold block prints for that
+design. The shortlist therefore reads 1..N with no gaps and no blank
+cross-references. The refold block's "Ranking native" is looked up by
 ``design_group`` so a representative that is a *different* sibling than the
 native-best one still resolves to its backbone's native rank.
 """
@@ -207,10 +208,11 @@ def build_candidates_table(
     """
     meta = _seq_meta(full_df)
     seq_to_group = {k: v["design_group"] for k, v in meta.items() if v.get("design_group") not in (None, "")}
-    # UPPER(sequence) → that sequence's OWN refold rank. Every refolded design
-    # has one (report.py does not renumber after collapsing), so a native row can
-    # quote the rank of the exact design it names — including a sibling the
-    # shortlist collapsed away.
+    # UPPER(sequence) → the refold rank of the DESIGN that sequence belongs to.
+    # `rank` is dense over distinct designs and shared by a backbone's siblings
+    # (see cli/report.py), so a native row can always quote a rank — including
+    # for a sibling the shortlist collapsed — and it is the same number the
+    # shortlist prints for that design.
     seq_to_rank = {
         str(r.get("sequence", "")).strip().upper(): r.get("rank", "")
         for r in full_df.to_dict("records")
