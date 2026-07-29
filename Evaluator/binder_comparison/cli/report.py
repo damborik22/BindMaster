@@ -488,10 +488,7 @@ def run(args: argparse.Namespace) -> None:
     # applied internally (no pre-processing needed).
     candidates = build_candidates_table(df, df_display, tool_csvs or None)
     write_csv(candidates, output_dir / "candidates.csv")
-    print(
-        f"  candidates.csv — per-tool native top-{N_NATIVE_PER_TOOL} "
-        f"+ refold top-{N_REFOLD} with sequences"
-    )
+    print(f"  candidates.csv — per-tool native top-{N_NATIVE_PER_TOOL} + refold top-{N_REFOLD} with sequences")
 
     # Step 4c: Copy top-20 refolded PDB structures for visual inspection.
     # Prefer the *primary engine's* PDB so the viewer shows the structure
