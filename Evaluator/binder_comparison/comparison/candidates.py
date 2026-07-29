@@ -116,6 +116,7 @@ def collapse_native_df(
     csv_path: str | Path,
     seq_to_group: dict[str, str],
     top_n: int | None = None,
+    collapse: bool = True,
 ) -> pd.DataFrame:
     """Read a tool's native CSV → keep refolded designs only, one row per backbone.
 
@@ -146,7 +147,8 @@ def collapse_native_df(
             f"[candidates] {csv_path}: none of its {n_read} native designs are in the refold pool — "
             "this tool's native block is dropped. Stale native CSV (tool re-run since it was written)?"
         )
-    native = native[~native["_design_group"].duplicated(keep="first")]  # backbone collapse
+    if collapse:
+        native = native[~native["_design_group"].duplicated(keep="first")]  # backbone collapse
     native = native.reset_index(drop=True)
     if top_n is not None:
         native = native.head(top_n)
@@ -222,23 +224,31 @@ def build_candidates_table(
     rows: list[dict] = []
 
     # --- per-tool native blocks (canonical order), refolded designs only ---
-    grp_native_rank: dict[str, dict[str, int]] = {}
+    seq_native_rank: dict[str, dict[str, int]] = {}
     tool_csvs = tool_csvs or {}
     for tool in order_tools(tool_csvs.keys()):
-        survivors = collapse_native_df(tool_csvs[tool], seq_to_group, top_n=None)
-        if survivors.empty:
+        # Native rank is per SEQUENCE, over every in-pool design the tool ranked —
+        # NOT per backbone. The tool and the refold can prefer different siblings
+        # of one backbone (BindCraft rates l127_s975277_mpnn3 4th, we rate its
+        # sibling _mpnn4 higher), so a backbone-level native rank would print the
+        # best-native sibling's number on a row holding a different sequence.
+        full_native = collapse_native_df(tool_csvs[tool], seq_to_group, top_n=None, collapse=False)
+        if full_native.empty:
             continue
-        # Dense native rank over ALL surviving backbones, so the refold block can
-        # resolve a backbone's native rank even when it sits below the top-N.
-        grp_native_rank[tool] = {dg: i for i, dg in enumerate(survivors["_design_group"].tolist(), start=1)}
+        seq_native_rank[tool] = {k: i for i, k in enumerate(full_native["_seq_key"].tolist(), start=1)}
+        # The block itself still shows one row per backbone (siblings of a design
+        # we already list add nothing), so its numbers skip — same as the refold
+        # block's do, and for the same reason.
+        survivors = full_native[~full_native["_design_group"].duplicated(keep="first")].reset_index(drop=True)
         set_label = f"Native top-{n_native}"
-        for native_rank, key in enumerate(survivors["_seq_key"].head(n_native).tolist(), start=1):
+        for key in survivors["_seq_key"].head(n_native).tolist():
             m = meta.get(key, {})
             rows.append(
                 {
                     "Set": set_label,
                     "Method": tool,
-                    "Ranking native": native_rank,
+                    # THIS sequence's own native rank — never a sibling's.
+                    "Ranking native": seq_native_rank[tool].get(key, ""),
                     # THIS design's own refold rank — never a sibling's.
                     "Ranking refolded": seq_to_rank.get(key, ""),
                     "Mean_ipTM": m.get("Mean_ipTM", ""),
@@ -254,8 +264,11 @@ def build_candidates_table(
     unresolved: dict[str, int] = {}
     for refold_rank, row in enumerate(df_display.head(n_refold).to_dict("records"), start=1):
         tool = row.get("source_tool", "")
-        native_rank = grp_native_rank.get(tool, {}).get(row.get("design_group", ""), "")
-        if native_rank == "" and tool in grp_native_rank:
+        # THIS sequence's own native rank. Looking it up by design_group instead
+        # printed the best-native sibling's number here: our rank-22 row is
+        # l127_s975277_mpnn4 (native 10), and it read 4 — mpnn3's.
+        native_rank = seq_native_rank.get(tool, {}).get(str(row.get("sequence", "")).strip().upper(), "")
+        if native_rank == "" and tool in seq_native_rank:
             unresolved[tool] = unresolved.get(tool, 0) + 1
         rows.append(
             {

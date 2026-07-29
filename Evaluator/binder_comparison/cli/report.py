@@ -360,22 +360,15 @@ def run(args: argparse.Namespace) -> None:
             f"[report] Collapsing {len(df) - n_groups} near-duplicate variant(s) → "
             f"{n_groups} distinct designs (best per trajectory; --no-collapse-duplicates to disable)"
         )
-        # `rank` ranks DESIGNS, not sequences. It is dense over distinct designs
-        # (1..n_groups, no gaps) and every sibling of a backbone carries its
-        # backbone's rank — because siblings ARE one design, differing only in
-        # the sequence MPNN wrote for it. That single definition is what makes
-        # the three views agree with no gaps and no blanks:
-        #   * the shortlist reads 1..50 straight through;
-        #   * a native row for a sibling the shortlist collapsed still has a rank
-        #     to show (its design's), so the tool's own top-20 is never blank;
-        #   * looking any design up in metrics.csv returns the number the
-        #     shortlist printed.
-        # Ranking sequences instead put holes in the shortlist (a collapsed
-        # sibling consumed a number nothing displayed); renumbering only the
-        # representatives left 11 of BindCraft's native top-20 with no rank.
+        # `rank` ranks SEQUENCES and is NOT renumbered here. Collapsing decides
+        # which designs the shortlist SHOWS, never what they are called, so every
+        # refolded sequence keeps one rank and no number ever means two things.
+        # The shortlist consequently skips a number where a sibling was collapsed
+        # — that is intended, and it is what lets each row quote the rank of the
+        # exact sequence it names. Renumbering over backbones instead forced two
+        # sequences to share a rank, which hid that the tool and the refold can
+        # prefer *different* siblings of one backbone.
         df_display = df[df["is_representative"]].reset_index(drop=True)
-        df_display["rank"] = range(1, len(df_display) + 1)
-        df["rank"] = df["design_group"].map(dict(zip(df_display["design_group"], df_display["rank"])))
     else:
         df_display = df
 

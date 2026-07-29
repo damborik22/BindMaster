@@ -53,16 +53,13 @@ def _full_df():
 
 
 def _df_display(full):
-    """Like cli/report.py: rank DESIGNS, not sequences.
+    """Like cli/report.py: collapse to representatives, never renumber.
 
-    Dense 1..n over distinct designs, and every sibling carries its backbone's
-    rank — so the shortlist has no gaps and no native row is left without a
-    cross-reference. Mutates `full` the way report.py mutates `df`.
+    `rank` stays each SEQUENCE's own, so the shortlist skips a number where a
+    sibling was collapsed and every row can quote the rank of the exact sequence
+    it names.
     """
-    disp = full[full["is_representative"]].sort_values("rank").reset_index(drop=True).copy()
-    disp["rank"] = range(1, len(disp) + 1)
-    full["rank"] = full["design_group"].map(dict(zip(disp["design_group"], disp["rank"], strict=False)))
-    return disp
+    return full[full["is_representative"]].sort_values("rank").reset_index(drop=True).copy()
 
 
 def _write(tmp_path, name, df):
@@ -100,10 +97,11 @@ def test_collapse_warns_when_stale_csv_matches_nothing_in_pool(tmp_path):
 def test_build_candidates_full(tmp_path):
     full = _full_df()
     disp = _df_display(full)
-    # bindcraft native CSV in native-rank order; the best-native row of bc_t1 is
-    # the mpnn2 sibling (AAAB), NOT the refold representative (AAAA). Includes a
-    # never-refolded design (XXXX) that must be dropped.
-    bindcraft = pd.DataFrame({"Sequence": ["AAAB", "XXXX", "CCCC"]})
+    # bindcraft native CSV in native-rank order. Both bc_t1 siblings are listed,
+    # and the tool ranks AAAB above AAAA while our refold prefers AAAA — the real
+    # BindCraft case (it rates l127_s975277_mpnn3 4th; we rate its sibling _mpnn4
+    # higher). Includes a never-refolded design (XXXX) that must be dropped.
+    bindcraft = pd.DataFrame({"Sequence": ["AAAB", "AAAA", "XXXX", "CCCC"]})
     mosaic = pd.DataFrame({"sequence": ["MMMM"]})
     tool_csvs = {
         "bindcraft": _write(tmp_path, "bc.csv", bindcraft),
@@ -120,27 +118,26 @@ def test_build_candidates_full(tmp_path):
     native_order = list(dict.fromkeys(t[t["Set"].str.startswith("Native")]["Method"]))
     assert native_order == ["bindcraft", "mosaic"]
 
-    # bindcraft native block: XXXX dropped (not refolded), bc_t1 collapsed to one
-    # row, dense native rank 1..N. The row shows the TOOL's pick (AAAB, bc_t1's
-    # best-native sibling) — our refold must not swap it for the representative.
+    # bindcraft native block: XXXX dropped (not refolded), bc_t1 shown once via
+    # the TOOL's pick (AAAB) — our refold must not swap it for AAAA. Native rank
+    # is per SEQUENCE, so the block skips 2: that is AAAA, a sibling of a design
+    # already listed.
     bc_nat = t[(t["Set"].str.startswith("Native")) & (t["Method"] == "bindcraft")]
     assert list(bc_nat["Primary sequence"]) == ["AAAB", "CCCC"]
-    assert list(bc_nat["Ranking native"]) == [1, 2]
+    assert list(bc_nat["Ranking native"]) == [1, 3]
 
-    # The bc_t1 refold representative (AAAA) is a DIFFERENT sibling than the
-    # native-best (AAAB); its refold-block "Ranking native" still resolves to
-    # bc_t1's native rank (1) via design_group.
+    # THE POINT: the refold block's bc_t1 row holds AAAA, so it must print AAAA's
+    # OWN native rank (2) — not AAAB's 1, which is a different sequence.
     refold = t[t["Set"].str.startswith("Refold")]
     bc_ref = refold[refold["Method"] == "bindcraft"]
     bc_t1_row = bc_ref[bc_ref["Primary sequence"] == "AAAA"]
-    assert list(bc_t1_row["Ranking native"]) == [1]
+    assert list(bc_t1_row["Ranking native"]) == [2]
 
-    # Siblings share their DESIGN's rank, so the native row for AAAB quotes the
-    # same 2 the refold block prints for its representative AAAA — and the
-    # shortlist runs 1..n with no gaps.
+    # Every rank is its own sequence's: AAAA refolds at 2, AAAB at 3. The refold
+    # block therefore skips 3 — AAAB was collapsed as a sibling of AAAA.
     assert list(bc_t1_row["Ranking refolded"]) == [2]
-    assert list(bc_nat[bc_nat["Primary sequence"] == "AAAB"]["Ranking refolded"]) == [2]
-    assert sorted(refold["Ranking refolded"]) == [1, 2, 3]
+    assert list(bc_nat[bc_nat["Primary sequence"] == "AAAB"]["Ranking refolded"]) == [3]
+    assert sorted(refold["Ranking refolded"]) == [1, 2, 4]
 
     # Length is a plain int, not a float.
     assert all(isinstance(v, int) for v in t["Length"])
