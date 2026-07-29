@@ -19,18 +19,25 @@ Two correctness rules are baked in here so the file is right straight out of
      native-block row is therefore a refolded design (no blank-metric rows,
      barring a design whose engines all failed to score).
   2. Backbone collapse — a tool's native CSV may list many sequences for one
-     backbone (BindCraft MPNN siblings, Protein-Hunter cycles); we keep the
-     best-native-ranked sequence per ``design_group`` so every row is a
-     distinct design. Native rank is dense over the surviving distinct
-     backbones.
+     backbone (BindCraft MPNN siblings, Protein-Hunter cycles); we keep one row
+     per ``design_group`` so every row is a distinct design. Native rank is
+     dense over the surviving distinct backbones.
 
-Both "Ranking refolded" columns use the SAME ranking — the collapsed two-stage
-order (``df_display`` dense ``rank``), looked up by ``design_group`` — so
-a native design and the refold-block appearance of its backbone carry the same
-refold rank. Likewise the refold block's "Ranking native" is looked up by
-``design_group`` (not exact sequence) so a refold representative that is a
-*different* MPNN sibling than the native-best one still resolves to its
-backbone's native rank.
+  3. One row = one real design. A backbone's best-NATIVE sibling and its refold
+     REPRESENTATIVE are often different sequences, so a native row is rendered
+     entirely from the representative — sequence, metrics and rank together.
+     Printing one sibling's ipTM beside another's rank produced rows describing
+     no actual design: on the shipped CALCA top-50 pool 10 of 140 native rows
+     were such chimeras (bindcraft native #4 showed mpnn3's ipTM 0.917, whose
+     true rank is 26, next to mpnn4's rank 22, whose ipTM is 0.921), and a
+     reader checking the stated rank found different numbers.
+
+Both blocks quote the SAME ranking — ``df_display``'s dense ``rank`` column —
+looked up by ``design_group``, so a backbone carries one refold rank wherever
+it appears. Likewise the refold block's "Ranking native" is looked up by
+``design_group`` (not exact sequence) so a representative that is a *different*
+MPNN sibling than the native-best one still resolves to its backbone's native
+rank.
 """
 
 from __future__ import annotations
@@ -41,9 +48,9 @@ from pathlib import Path
 
 import pandas as pd
 
-# Section sizes — fixed by request: per-method 20 native designs + 30 refolded.
+# Section sizes — fixed by request: per-method 20 native designs + 50 refolded.
 N_NATIVE_PER_TOOL = 20
-N_REFOLD = 30
+N_REFOLD = 50
 
 # Native blocks are emitted in this order; the refold block always comes last.
 CANONICAL_TOOL_ORDER = [
@@ -193,9 +200,15 @@ def build_candidates_table(
     """
     meta = _seq_meta(full_df)
     seq_to_group = {k: v["design_group"] for k, v in meta.items() if v.get("design_group") not in (None, "")}
-    # backbone → collapsed two-stage refold rank (the single, dense ranking used
-    # by both the refold block and the native block's "Ranking refolded").
-    grp_to_refold_rank = dict(zip(df_display.get("design_group", []), df_display.get("rank", []), strict=False))
+    # backbone → its ranked representative row (the collapsed frame is already
+    # ordered best-first, so the first row seen per group is the rep). Native
+    # rows are rendered FROM this row — sequence, metrics and rank together — so
+    # a row never mixes a native-best sibling's metrics with its rep's rank.
+    grp_to_rep: dict[str, dict] = {}
+    for _row in df_display.to_dict("records"):
+        _g = _row.get("design_group", "")
+        if _g not in (None, "") and _g not in grp_to_rep:
+            grp_to_rep[_g] = _row
 
     rows: list[dict] = []
 
@@ -212,17 +225,35 @@ def build_candidates_table(
         set_label = f"Native top-{n_native}"
         for native_rank, key in enumerate(survivors["_seq_key"].head(n_native).tolist(), start=1):
             m = meta.get(key, {})
+            rep = grp_to_rep.get(m.get("design_group", ""))
+            if rep is None:
+                # Backbone has no ranked representative (every design on it failed
+                # to score). Show the native design itself, with no refold rank.
+                rows.append(
+                    {
+                        "Set": set_label,
+                        "Method": tool,
+                        "Ranking native": native_rank,
+                        "Ranking refolded": "",
+                        "Mean_ipTM": m.get("Mean_ipTM", ""),
+                        "Mean_ipSAE_min": m.get("Mean_ipSAE_min", ""),
+                        "Solubility SoluProt": m.get("Solubility SoluProt", ""),
+                        "Length": m.get("Length", ""),
+                        "Primary sequence": m.get("Primary sequence", ""),
+                    }
+                )
+                continue
             rows.append(
                 {
                     "Set": set_label,
                     "Method": tool,
                     "Ranking native": native_rank,
-                    "Ranking refolded": grp_to_refold_rank.get(m.get("design_group", ""), ""),
-                    "Mean_ipTM": m.get("Mean_ipTM", ""),
-                    "Mean_ipSAE_min": m.get("Mean_ipSAE_min", ""),
-                    "Solubility SoluProt": m.get("Solubility SoluProt", ""),
-                    "Length": m.get("Length", ""),
-                    "Primary sequence": m.get("Primary sequence", ""),
+                    "Ranking refolded": rep.get("rank", ""),
+                    "Mean_ipTM": _num3(rep.get("consensus_iptm_mean", "")),
+                    "Mean_ipSAE_min": _num3(rep.get("consensus_ipsae_min_mean", "")),
+                    "Solubility SoluProt": _num3(rep.get("native_soluprot_score", "")),
+                    "Length": _intlen(rep.get("binder_length", "")),
+                    "Primary sequence": rep.get("sequence", ""),
                 }
             )
 
@@ -236,7 +267,9 @@ def build_candidates_table(
                 "Set": set_label,
                 "Method": tool,
                 "Ranking native": native_rank,
-                "Ranking refolded": refold_rank,
+                # the frame's own rank, not the row position, so both blocks
+                # quote the same number for the same design
+                "Ranking refolded": row.get("rank", refold_rank),
                 "Mean_ipTM": _num3(row.get("consensus_iptm_mean", "")),
                 "Mean_ipSAE_min": _num3(row.get("consensus_ipsae_min_mean", "")),
                 "Solubility SoluProt": _num3(row.get("native_soluprot_score", "")),

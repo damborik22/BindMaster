@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ..comparison.candidates import build_candidates_table
+from ..comparison.candidates import N_NATIVE_PER_TOOL, N_REFOLD, build_candidates_table
 from ..comparison.diversity import cluster_sequences_df
 from ..comparison.ensemble import compute_ensemble_metrics
 from ..comparison.epitope import epitope_match, extract_interface_residues, parse_hotspots
@@ -481,7 +481,10 @@ def run(args: argparse.Namespace) -> None:
     # applied internally (no pre-processing needed).
     candidates = build_candidates_table(df, df_display, tool_csvs or None)
     write_csv(candidates, output_dir / "candidates.csv")
-    print("  candidates.csv — per-tool native top-20 + refold top-30 with sequences")
+    print(
+        f"  candidates.csv — per-tool native top-{N_NATIVE_PER_TOOL} "
+        f"+ refold top-{N_REFOLD} with sequences"
+    )
 
     # Step 4c: Copy top-20 refolded PDB structures for visual inspection.
     # Prefer the *primary engine's* PDB so the viewer shows the structure
