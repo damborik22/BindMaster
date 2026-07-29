@@ -53,9 +53,9 @@ def _full_df():
 
 
 def _df_display(full):
-    disp = full[full["is_representative"]].sort_values("rank").reset_index(drop=True).copy()
-    disp["rank"] = range(1, len(disp) + 1)  # dense, like cli/report.py
-    return disp
+    # Like cli/report.py: collapse to representatives but do NOT renumber, so
+    # every sequence keeps its own rank and the shortlist skips the collapsed one.
+    return full[full["is_representative"]].sort_values("rank").reset_index(drop=True).copy()
 
 
 def _write(tmp_path, name, df):
@@ -114,11 +114,10 @@ def test_build_candidates_full(tmp_path):
     assert native_order == ["bindcraft", "mosaic"]
 
     # bindcraft native block: XXXX dropped (not refolded), bc_t1 collapsed to one
-    # row, dense native rank 1..N. AAAB is bc_t1's best-NATIVE sibling, but the
-    # row is rendered from the backbone's refold REPRESENTATIVE (AAAA) so its
-    # metrics and its rank describe the same design.
+    # row, dense native rank 1..N. The row shows the TOOL's pick (AAAB, bc_t1's
+    # best-native sibling) — our refold must not swap it for the representative.
     bc_nat = t[(t["Set"].str.startswith("Native")) & (t["Method"] == "bindcraft")]
-    assert list(bc_nat["Primary sequence"]) == ["AAAA", "CCCC"]
+    assert list(bc_nat["Primary sequence"]) == ["AAAB", "CCCC"]
     assert list(bc_nat["Ranking native"]) == [1, 2]
 
     # The bc_t1 refold representative (AAAA) is a DIFFERENT sibling than the
@@ -129,10 +128,12 @@ def test_build_candidates_full(tmp_path):
     bc_t1_row = bc_ref[bc_ref["Primary sequence"] == "AAAA"]
     assert list(bc_t1_row["Ranking native"]) == [1]
 
-    # "Ranking refolded" is the SAME dense rank in both blocks for a backbone.
-    # bc_t1's refold rep AAAA is dense rank 2; its native row must show 2.
+    # Each row quotes ITS OWN design's rank: the refold block's AAAA shows 2, and
+    # the native row for AAAB shows 3 — AAAB's own rank, not its backbone's.
     assert list(bc_t1_row["Ranking refolded"]) == [2]
-    assert list(bc_nat[bc_nat["Primary sequence"] == "AAAA"]["Ranking refolded"]) == [2]
+    assert list(bc_nat[bc_nat["Primary sequence"] == "AAAB"]["Ranking refolded"]) == [3]
+    # The shortlist therefore skips 3 (AAAB was collapsed away).
+    assert sorted(refold["Ranking refolded"]) == [1, 2, 4]
 
     # Length is a plain int, not a float.
     assert all(isinstance(v, int) for v in t["Length"])
@@ -178,7 +179,8 @@ def test_native_row_is_one_real_design(tmp_path):
 
     nat = t[t["Set"].str.startswith("Native")]
     by_seq = full.set_index("sequence")
-    rank_to_seq = dict(zip(disp["rank"], disp["sequence"], strict=False))
+    # every refolded sequence keeps a rank, collapsed siblings included
+    rank_to_seq = dict(zip(full["rank"], full["sequence"], strict=False))
     for _, row in nat.iterrows():
         seq = row["Primary sequence"]
         shown_rank = row["Ranking refolded"]

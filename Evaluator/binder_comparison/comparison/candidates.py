@@ -23,21 +23,28 @@ Two correctness rules are baked in here so the file is right straight out of
      per ``design_group`` so every row is a distinct design. Native rank is
      dense over the surviving distinct backbones.
 
-  3. One row = one real design. A backbone's best-NATIVE sibling and its refold
-     REPRESENTATIVE are often different sequences, so a native row is rendered
-     entirely from the representative — sequence, metrics and rank together.
-     Printing one sibling's ipTM beside another's rank produced rows describing
-     no actual design: on the shipped CALCA top-50 pool 10 of 140 native rows
-     were such chimeras (bindcraft native #4 showed mpnn3's ipTM 0.917, whose
-     true rank is 26, next to mpnn4's rank 22, whose ipTM is 0.921), and a
-     reader checking the stated rank found different numbers.
+  3. One row = one real design, and **the native block is the TOOL's view** — our
+     refold never picks which sibling it shows, nor reorders it. A backbone's
+     best-NATIVE sibling and our refold REPRESENTATIVE are often different
+     sequences; the native block shows the tool's pick and quotes *that
+     sequence's own* refold rank. Both halves of the row therefore describe the
+     same molecule.
 
-Both blocks quote the SAME ranking — ``df_display``'s dense ``rank`` column —
-looked up by ``design_group``, so a backbone carries one refold rank wherever
-it appears. Likewise the refold block's "Ranking native" is looked up by
-``design_group`` (not exact sequence) so a representative that is a *different*
-MPNN sibling than the native-best one still resolves to its backbone's native
-rank.
+     Getting this wrong in either direction has already shipped. Printing the
+     native sibling's ipTM beside the representative's rank made rows describing
+     no actual design (10 of 140 on the CALCA top-50 pool: bindcraft native #4
+     showed mpnn3's ipTM 0.917, true rank 26, next to mpnn4's rank 22, ipTM
+     0.921). Rendering the row *from* the representative instead fixed the
+     arithmetic but let our ranking overwrite the tool's own #1 — BindCraft ranks
+     ``…_l186_s671234_mpnn5`` first, and the table said ``_mpnn2``.
+
+This works only because ``rank`` is never renumbered after collapsing (see
+``cli/report.py``), so every refolded sequence keeps a rank and a collapsed
+sibling can still be quoted. The refold block quotes each row's own ``rank``
+too; it therefore skips numbers where a sibling was collapsed, and a missing
+number means exactly that. The refold block's "Ranking native" is looked up by
+``design_group`` so a representative that is a *different* sibling than the
+native-best one still resolves to its backbone's native rank.
 """
 
 from __future__ import annotations
@@ -200,15 +207,15 @@ def build_candidates_table(
     """
     meta = _seq_meta(full_df)
     seq_to_group = {k: v["design_group"] for k, v in meta.items() if v.get("design_group") not in (None, "")}
-    # backbone → its ranked representative row (the collapsed frame is already
-    # ordered best-first, so the first row seen per group is the rep). Native
-    # rows are rendered FROM this row — sequence, metrics and rank together — so
-    # a row never mixes a native-best sibling's metrics with its rep's rank.
-    grp_to_rep: dict[str, dict] = {}
-    for _row in df_display.to_dict("records"):
-        _g = _row.get("design_group", "")
-        if _g not in (None, "") and _g not in grp_to_rep:
-            grp_to_rep[_g] = _row
+    # UPPER(sequence) → that sequence's OWN refold rank. Every refolded design
+    # has one (report.py does not renumber after collapsing), so a native row can
+    # quote the rank of the exact design it names — including a sibling the
+    # shortlist collapsed away.
+    seq_to_rank = {
+        str(r.get("sequence", "")).strip().upper(): r.get("rank", "")
+        for r in full_df.to_dict("records")
+        if str(r.get("sequence", "")).strip()
+    }
 
     rows: list[dict] = []
 
@@ -225,35 +232,18 @@ def build_candidates_table(
         set_label = f"Native top-{n_native}"
         for native_rank, key in enumerate(survivors["_seq_key"].head(n_native).tolist(), start=1):
             m = meta.get(key, {})
-            rep = grp_to_rep.get(m.get("design_group", ""))
-            if rep is None:
-                # Backbone has no ranked representative (every design on it failed
-                # to score). Show the native design itself, with no refold rank.
-                rows.append(
-                    {
-                        "Set": set_label,
-                        "Method": tool,
-                        "Ranking native": native_rank,
-                        "Ranking refolded": "",
-                        "Mean_ipTM": m.get("Mean_ipTM", ""),
-                        "Mean_ipSAE_min": m.get("Mean_ipSAE_min", ""),
-                        "Solubility SoluProt": m.get("Solubility SoluProt", ""),
-                        "Length": m.get("Length", ""),
-                        "Primary sequence": m.get("Primary sequence", ""),
-                    }
-                )
-                continue
             rows.append(
                 {
                     "Set": set_label,
                     "Method": tool,
                     "Ranking native": native_rank,
-                    "Ranking refolded": rep.get("rank", ""),
-                    "Mean_ipTM": _num3(rep.get("consensus_iptm_mean", "")),
-                    "Mean_ipSAE_min": _num3(rep.get("consensus_ipsae_min_mean", "")),
-                    "Solubility SoluProt": _num3(rep.get("native_soluprot_score", "")),
-                    "Length": _intlen(rep.get("binder_length", "")),
-                    "Primary sequence": rep.get("sequence", ""),
+                    # THIS design's own refold rank — never a sibling's.
+                    "Ranking refolded": seq_to_rank.get(key, ""),
+                    "Mean_ipTM": m.get("Mean_ipTM", ""),
+                    "Mean_ipSAE_min": m.get("Mean_ipSAE_min", ""),
+                    "Solubility SoluProt": m.get("Solubility SoluProt", ""),
+                    "Length": m.get("Length", ""),
+                    "Primary sequence": m.get("Primary sequence", ""),
                 }
             )
 
