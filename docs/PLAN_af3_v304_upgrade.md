@@ -101,14 +101,41 @@ unified-memory path — which is what actually unlocks complexes above the
 from the release note wording, not stated by a maintainer; the issue is closed
 with no documented resolution. It is directly testable on Spark.
 
-⚠️ **Regression risk attached to this item — check it before anything else.**
-We set `XLA_PYTHON_CLIENT_MEM_FRACTION`. AF3's docs and issue #596 both use
-`XLA_CLIENT_MEM_FRACTION` (no `PYTHON_`). These are two different variable
-names. I could not confirm from the JAX changelog which name JAX 0.10.2
-actually honours. **If 0.10.2 reads only the newer name, our OOM guard becomes
-a silent no-op the moment we upgrade** — and the failure mode this guard exists
-to prevent is *a whole-box reboot*, not a clean crash. Verify empirically
-before the first upgraded Spark run; consider setting both names.
+⚠️ **This section originally flagged an unverified naming risk. It has since
+been resolved, and the answer inverted the obvious fix — see below.** The
+remaining hardware steps live in `docs/PLAN_af3_spark_runbook.md`.
+
+We set `XLA_PYTHON_CLIENT_MEM_FRACTION`; AF3's docs and issue #596 use
+`XLA_CLIENT_MEM_FRACTION` (no `PYTHON_`). Checking jaxlib settled it:
+
+```python
+memory_fraction = os.getenv('XLA_CLIENT_MEM_FRACTION', '')
+deprecated_memory_fraction = os.getenv('XLA_PYTHON_CLIENT_MEM_FRACTION', '')
+if deprecated_memory_fraction:
+    if memory_fraction:
+        raise ValueError('XLA_CLIENT_MEM_FRACTION is specified together '
+                         'with XLA_PYTHON_CLIENT_MEM_FRACTION. '
+                         'Remove the latter one, it is deprecated.')
+```
+
+So the legacy name is **still read** — the guard was never at risk of silently
+no-opping on 0.10.2 — but setting **both** names is a hard `ValueError`. The
+"consider setting both names" suggestion above would therefore have broken
+every AF3 run.
+
+That turned a hypothetical into a **live bug at the current pin**: we built the
+child env as `{**os.environ, "XLA_PYTHON_CLIENT_MEM_FRACTION": ...}`, so any
+operator who exported `XLA_CLIENT_MEM_FRACTION` — which is exactly what AF3's
+`docs/performance.md` tells unified-memory hosts to do — got both names in the
+child and lost every design to that ValueError, near-silently (empty rows, then
+a blanket ≥3-engine gate failure).
+
+**Fixed** in `_build_af3_env` (`Evaluator/scripts/refold_af3.py`), covered by
+`tests/binder_comparison/test_af3_env.py`: exactly one name reaches the child,
+an inherited `XLA_CLIENT_MEM_FRACTION` is forwarded rather than discarded, and
+the legacy name is the one we emit (honoured by both 0.9.x and 0.10.x, whereas
+older jaxlib ignores the newer name). Step B of the runbook re-checks this on
+Spark after the upgrade.
 
 ### 3.2 The ">100 GB VRAM" requirement is probably wrong, and it costs us the fleet
 
@@ -206,7 +233,7 @@ pool instead of one per design.
 
 | risk | severity | mitigation |
 |---|---|---|
-| `XLA_PYTHON_CLIENT_MEM_FRACTION` ignored by JAX 0.10.2 → OOM guard is a no-op → **box reboot** on Spark | **high** | verify var name first; set both; test on a sacrificial run before a real pool (§3.1) |
+| ~~`XLA_PYTHON_CLIENT_MEM_FRACTION` ignored by JAX 0.10.2 → OOM guard is a no-op~~ — **resolved**: the legacy name is still read; the real bug was that setting *both* names raises `ValueError` | was high | **fixed** in `_build_af3_env` (§3.1). Re-confirm on 0.10.2 via runbook step B before the first Spark pool |
 | JAX 0.9.1 → 0.10.2 is a major dep jump; `jax[cuda12]` plugin must resolve on **linux-aarch64** for Spark | medium | build the env on Spark before touching x86 hosts; do not re-pin `AF3_COMMIT` until it does |
 | Tokamax 0.0.12 Triton kernels on sm_121 | medium | `--flash_attention_implementation` (`triton`/`cudnn`/`xla`) already exists at our pin — `xla` is the fallback |
 | Numerical drift vs already-published `af3_*` scores | medium | **do not mix engine versions inside one pool.** Re-refold a completed pool on both pins and compare `af3_iptm` before adopting; if it moves, note the version in the run's `settings.json` |
