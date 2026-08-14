@@ -318,9 +318,44 @@ binder-compare run --mosaic runs/PDL1/mosaic --bindcraft runs/PDL1/bindcraft \
                    --target-seq "MKTAYIAKQR…" -o runs/PDL1/evaluate
 ```
 
-Individual steps are also subcommands: `extract`, `refold-boltz2`, `refold-af3`, `refold-esmfold2`, `report`, and `autosize`. The configurator-generated `runs/<name>/run_evaluate.sh` wraps `Evaluator/evaluate.sh`, which auto-detects the installed engines and drives the whole thing.
+The configurator-generated `runs/<name>/run_evaluate.sh` wraps `Evaluator/evaluate.sh`, which auto-detects the installed engines and drives the whole thing.
 
-Report output lands in `…/evaluate/report/` — `report.html`, `metrics.csv`, and `top20_candidates.csv`, ranked two-stage.
+Report output lands in `…/evaluate/report/` — `report.html`, `metrics.csv`, and `top20_candidates.csv`.
+
+#### All `binder-compare` subcommands
+
+Every one takes `--help`. `bindmaster evaluate <cmd> …` runs the same thing inside the
+`binder-eval` conda env.
+
+| Subcommand | What it does |
+|---|---|
+| `extract` | Pull binder sequences out of any combination of the seven tools' outputs into one FASTA |
+| `parse-seqs` | Convert sequences from FASTA / one-per-line / CSV / comma-separated into FASTA |
+| `validate` | Sanity-check sequences (alphabet, length, duplicates, target parse) before spending GPU time |
+| `run` | The whole pipeline in one call: extract → refold-boltz2 → report |
+| `report` | Merge the per-engine refold CSVs, rank, and write `report.html` + `metrics.csv` |
+| **Refolding** | |
+| `refold-boltz2` | Refold with Boltz-2 (Mosaic venv) |
+| `refold-af3` | Refold with AlphaFold 3 v3.0.2 (`binder-eval-af3`; needs ≥100 GB GPU memory) |
+| `refold-esmfold2` | Refold with ESMFold2 (`binder-eval-esmfold2`) — the default engine |
+| **Screening before the GPU** | |
+| `filter-soluprot` | Sequence-only *E. coli* solubility score (`binder-eval-soluprot`, no GPU) |
+| `prefilter` | Rank designs by a Boltz-2 fold-back interface score, for tools with no native metric (e.g. RFD3) |
+| `autosize` | Decide whether enough independent designs cleared the ESMFold2 gate; size the next batch |
+| **Campaign planning** | |
+| `analyze-target` | Advisory target difficulty, suggested binder length, hotspots and batch size, from a PDB |
+| `diversity` | Cluster designs into families by sequence identity (greedy, CD-HIT-style) |
+| **Shortlist QC (all advisory — none of these reorder or drop)** | |
+| `monomer` | Flag context-dependent folds: binder-alone vs in-complex Cα RMSD |
+| `beta-check` | Flag binder→target β-sheet intercalation (β-augmentation) via DSSP cross-chain bridges |
+| `epitope` | Compute `epitope_match_fraction` against an intended hotspot list |
+| `epitope-map` | Interactive target structure coloured by binding frequency, with per-binding-mode toggles |
+| `qc-annotate` | Interface-quality annotation of a shortlist (BindCraft panel; relax + Rosetta) |
+| `affinity` | Rank affinity among binders via \|dG/dSASA\| gated by `ipsae_min` — **advisory, not validated** (Part N) |
+| **Wet lab** | |
+| `wetlab` | Markdown plan: synthesis, expression, assays, FASTA with biophysical properties |
+| `hits` | Build the Selected Hits workbook from `candidates.csv` (top-N per tool + top-M refolded) |
+| `mature` | Choose the next maturation round — strategy and parents — from returned binding data |
 
 #### `autosize` — adaptive sampling
 
@@ -534,28 +569,27 @@ audit as a record of what was wrong, not as current behaviour.
 
 The items below are what is still true today.
 
-### Live issues
+### Things worth knowing before you run it
 
-- **The configurator aborts with a Python traceback if an enabled tool is not
-  installed.** Step 5 shows each tool's install status but does not stop you enabling
-  one that is missing, and the generators read that tool's files unguarded —
-  `BindCraft/settings_filters/*.json`, `Mosaic/examples/bindmaster_examples/hallucinate_bindmaster.py`.
-  Worse, `runs/<name>/config.json` is written *last*, so a crash mid-generation loses
-  every wizard answer along with the partially-written run directory. Enable only tools
-  that report `installed`, and keep a copy of `config.json` from a previous run.
-- **`configurator --config` does not validate the config.** It checks `name`,
-  `run_dir` and `target_pdb_src`; roughly fifty further keys are read directly, so a
-  hand-edited or hand-written config fails with a bare `KeyError` (e.g.
-  `KeyError: 'boltzgen_intermediate'`) partway through generation. Replay a config the
-  wizard wrote, and edit values rather than removing keys.
-- **`evaluate.sh` has no `--min-engines` passthrough, and the gate defaults to 3.**
-  On a host without AF3 — the common case, since AF3 needs >100 GB of GPU memory —
-  only Boltz-2 and ESMFold2 run, so *every* design fails the cross-engine gate and is
-  ranked last. The report warns when this happens. To rank on two engines, re-run the
-  report step by hand: `binder-compare report --min-engines 2 …`.
-- **The TUI's "Evaluate results" entry is a dead end.** It invokes `bindmaster evaluate`
-  with no arguments, which argparse rejects with a usage error. Use
-  `bindmaster evaluate <subcommand>` from the shell, or `runs/<name>/run_evaluate.sh`.
+Not defects — behaviour that will surprise you if you have not met it.
+
+- **The cross-engine gate defaults to 3, and most hosts run two engines.** AF3 needs
+  >100 GB of GPU memory, so a typical box runs Boltz-2 + ESMFold2 and *every* design
+  fails a gate of 3 — ranked last, no shortlist. `evaluate.sh` says so before spending
+  any GPU time and names the flag; pass `--min-engines 2` to rank on the engines you
+  have. It is never lowered for you: deriving the gate from whatever happens to be
+  installed would make two operators with the same designs produce different rankings.
+- **Enable only tools that report `installed`.** The configurator refuses to generate a
+  run whose enabled tools are missing their assets, listing each one and the install
+  command, before writing anything. Nothing is half-built, but the run is not generated
+  either.
+- **Hand-written `--config` files are validated, not guessed at.** Missing keys are
+  listed by name up front. Start from a `runs/<name>/config.json` the wizard wrote and
+  edit values rather than composing one from scratch.
+- **`run_all.sh` does not stop at the first casualty.** A tool that dies is recorded and
+  the rest continue; the Evaluator reports on whatever finished; the script exits
+  non-zero at the end naming the failed steps. Check that summary line — a "complete"
+  run and a run that lost BoltzGen both produce a report.
 
 ### Correctness caveats worth knowing
 
@@ -581,11 +615,11 @@ packages are an operating manual, not a requirement. Two gaps affect scripted us
   `runs/<name>/config.json`, and `configurator --config <file>` regenerates a run
   directory with no prompts (`--run` also starts the pipeline). Replays are
   byte-identical.
-- **15 of the 22 `binder-compare` subcommands have no human-facing documentation.**
-  `analyze-target`, `mature`, `monomer`, `affinity` and `wetlab` are documented only
-  inside `.claude/skills/`; `prefilter`, `qc-annotate`, `epitope`, `epitope-map`,
-  `beta-check`, `diversity` and `validate` are documented nowhere. Use
-  `binder-compare <cmd> --help` in the meantime.
+- ~~**15 of the 22 `binder-compare` subcommands have no human-facing documentation.**~~
+  **Fixed:** all 22 are listed under
+  [All `binder-compare` subcommands](#all-binder-compare-subcommands), and a test
+  fails if the table and the parser disagree in either direction. `--help` on any
+  subcommand remains the detailed reference.
 
 ---
 

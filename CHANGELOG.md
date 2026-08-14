@@ -6,6 +6,65 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed (2026-08-14 — the rest of the terminal-path audit: the gate you cannot reach, the wizard session you lose, the menu that errors)
+
+Follow-on to the two fixes below, closing every remaining finding from the same pass.
+
+- **The cross-engine gate was unreachable from the script that runs the pipeline.**
+  `evaluate.sh` never passed `--min-engines`, so the default of 3 always applied — and
+  AF3 needs >100 GB of GPU memory, so on a typical host only Boltz-2 and ESMFold2 run
+  and *every* design failed the gate. The operator had to know to re-run the report
+  step by hand. `evaluate.sh` gained `--min-engines N` (validated: integer, floor 2)
+  and now counts the engines it will actually run, warning **before** any GPU time is
+  spent and naming the flag that fixes it. The gate is deliberately **not** derived
+  from the local install — that would make two operators with the same designs produce
+  different rankings, the same contradiction Part J's revert removed for Protenix.
+- **`evaluate.sh --help` required a Mosaic install, and `--skip-boltz2` did not skip it.**
+  The Mosaic venv was resolved at the top of the script, before argument parsing and
+  unconditionally, so the help could not be read without a full install and an
+  AF3 + ESMFold2 evaluation was refused on a host that legitimately has no Mosaic. Now
+  resolved after parsing, and only when Boltz-2 will run.
+- **The configurator turned a missing tool into a traceback and ate the session.**
+  Step 5 shows install status but never stopped you enabling a tool that is not there,
+  and the generators read that tool's files unguarded — BindCraft's filter/advanced
+  presets, Mosaic's `hallucinate_bindmaster.py`, BoltzGen's nanobody scaffolds. The
+  failure landed as a bare `FileNotFoundError` partway through, over a half-written run
+  directory. A new `preflight()` runs before anything is written and reports **every**
+  problem at once — each missing asset with the install command that supplies it —
+  then exits 1.
+- **`--config` replay is validated.** `load_run_config` checked three keys while the
+  generators read some fifty more directly, so a hand-edited config died with a bare
+  `KeyError: 'boltzgen_intermediate'` mid-generation. `REQUIRED_CFG_KEYS` names what
+  each tool needs; missing keys are listed by name, with a pointer to a wizard-written
+  config. The map is re-derived from the writer sources by a test, so a new `cfg["…"]`
+  in a generator cannot reach a user as a KeyError.
+- **`config.json` is written first, not last.** It was the final line of `generate()`,
+  so any failure before it cost the operator the entire wizard session — ~80 answers,
+  nothing to replay. Written immediately after the run directory is created, and again
+  at the end to capture the paths `generate()` derives.
+- **The TUI's "Evaluate results" entry showed an error, not the subcommands.** It ran
+  `bindmaster evaluate` with no arguments, which reaches argparse with a required
+  subcommand missing: one usage line, exit 2 — while the code comment promised it
+  "shows available subcommands". It now asks for `--help`.
+- **`run_all.sh` housekeeping.** The header comment named all seven tools regardless of
+  what was enabled, so a two-tool run advertised five it would never start; it is now
+  built from the enabled set. The output check ran `ls -A` on paths that are CSVs for
+  four of the tools, and `ls -A` on a file prints its name — so a 0-byte
+  `sequences.csv` counted as real output. Directories and files are now checked as what
+  they are. The `# shellcheck disable=SC1090` directive was present in three of the six
+  generated scripts; all six carry it, so every generated script is shellcheck-clean.
+
+### Added (2026-08-14 — README documents all 22 `binder-compare` subcommands)
+
+Fifteen had no human-facing documentation: `analyze-target`, `mature`, `monomer`,
+`affinity` and `wetlab` existed only inside `.claude/skills/` — agent instructions, not
+a manual — and `prefilter`, `qc-annotate`, `epitope`, `epitope-map`, `beta-check`,
+`diversity`, `hits` and `validate` were documented nowhere, so a terminal user could
+not discover them without reading `main.py`. They are now one grouped table, and
+`tests/test_readme_documents_the_cli.py` fails if the table and the parser disagree in
+either direction — an undocumented new subcommand, or a documented one that argparse
+would reject.
+
 ### Fixed (2026-08-14 — two silent failures in the terminal path: a void ranking, and a pipeline that stopped at the first casualty)
 
 Both found by driving the non-agent path end to end (`configure --config` → generated
