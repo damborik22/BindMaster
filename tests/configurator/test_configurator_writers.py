@@ -1,8 +1,11 @@
 """Tests for new configurator run script writers and config generators."""
 
+import ast
+import inspect
 import json
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -520,3 +523,165 @@ class TestRunConfigValidation:
         conf.write_run_config(p, cfg, {"rfd3": True})
         with pytest.raises(SystemExit):
             conf.load_run_config(p)
+
+
+class TestPreflightFailsBeforeWritingAnything:
+    """Enabling a tool that is not installed used to raise FileNotFoundError partway
+    through `generate()` — and because config.json was written on the LAST line, the
+    wizard's ~80 answers went with it, leaving a half-built run directory behind.
+    """
+
+    def _cfg(self, tmp_path):
+        run_dir = tmp_path / "runs" / "t"
+        run_dir.mkdir(parents=True)
+        target = tmp_path / "target.pdb"
+        target.write_text("ATOM\n")
+        return {
+            "name": "t",
+            "run_dir": run_dir,
+            "target_pdb": target,
+            "target_pdb_src": str(target),
+            "target_sequence": "MAEVKLSYVL",
+            "chains": "A",
+            "hotspots": "10",
+            "min_length": 65,
+            "max_length": 150,
+            "n_designs": 10,
+            "filter_preset": "default_filters",
+            "advanced_preset": "default_4stage_multimer",
+        }
+
+    def test_uninstalled_tool_exits_cleanly_instead_of_raising(self, tmp_path, capsys):
+        cfg = self._cfg(tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            conf.preflight(cfg, {"bindcraft": True})
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "not installed" in out
+        assert "bindmaster install --tool bindcraft" in out, "the error must say how to fix it"
+
+    def test_reports_every_problem_at_once(self, tmp_path, capsys):
+        """One run, one list — not a traceback per attempt."""
+        cfg = self._cfg(tmp_path)
+        with pytest.raises(SystemExit):
+            conf.preflight(cfg, {"bindcraft": True, "mosaic": True, "boltzgen": True})
+        out = capsys.readouterr().out
+        assert "BindCraft" in out and "Mosaic" in out
+        assert "boltzgen_intermediate" in out, "the missing cfg key must be listed too"
+
+    def test_missing_cfg_key_is_named_not_a_keyerror(self, tmp_path, capsys):
+        """Regression: a hand-edited --config died with `KeyError: 'boltzgen_intermediate'`
+        partway through generation. load_run_config validates only three keys."""
+        cfg = self._cfg(tmp_path)
+        with pytest.raises(SystemExit):
+            conf.preflight(cfg, {"boltzgen": True})
+        out = capsys.readouterr().out
+        assert "boltzgen_intermediate" in out
+        assert "config.json" in out, "point the operator at a config that is known-complete"
+
+    def test_a_complete_config_for_installed_tools_passes(self, tmp_path):
+        """Tools with no external assets and no extra keys must not be blocked."""
+        conf.preflight(self._cfg(tmp_path), {"rfd3": True, "protein_hunter": True, "evaluator": True})
+
+    def test_target_pdb_counts_as_present_when_the_source_is_given(self, tmp_path):
+        """generate() derives target_pdb from target_pdb_src, so requiring both would
+        reject every config the wizard writes for a fresh machine."""
+        cfg = self._cfg(tmp_path)
+        del cfg["target_pdb"]
+        conf.preflight(cfg, {"rfd3": True})
+
+    def test_generate_calls_preflight_before_touching_the_filesystem(self, tmp_path, monkeypatch):
+        cfg = self._cfg(tmp_path)
+        run_dir = cfg["run_dir"]
+        monkeypatch.setattr(conf, "preflight", lambda c, t: (_ for _ in ()).throw(SystemExit(1)))
+        with pytest.raises(SystemExit):
+            conf.generate(cfg, {"rfd3": True})
+        assert list(run_dir.iterdir()) == [], "generate() wrote files before validating"
+
+
+class TestConfigJsonSurvivesAFailedGeneration:
+    def test_config_written_before_the_tool_writers_run(self, tmp_path, monkeypatch):
+        """The answers are the expensive part — ~80 wizard prompts. They must outlive
+        any failure in the generators that follow."""
+        run_dir = tmp_path / "runs" / "t"
+        run_dir.mkdir(parents=True)
+        target = tmp_path / "target.pdb"
+        target.write_text("ATOM\n")
+        cfg = {
+            "name": "t",
+            "run_dir": run_dir,
+            "target_pdb": target,
+            "target_pdb_src": str(target),
+            "target_sequence": "MAEVKLSYVL",
+            "chains": "A",
+            "hotspots": "10",
+            "min_length": 65,
+            "max_length": 150,
+            "n_designs": 10,
+        }
+
+        def boom(*_a, **_k):
+            raise RuntimeError("generator exploded")
+
+        monkeypatch.setattr(conf, "write_run_rfd3", boom)
+        with pytest.raises(RuntimeError):
+            conf.generate(cfg, {"rfd3": True})
+
+        saved = run_dir / conf.CONFIG_FILENAME
+        assert saved.is_file(), "the wizard session was lost to a generator failure"
+        payload = json.loads(saved.read_text())
+        assert payload["cfg"]["name"] == "t"
+        assert payload["tools_enabled"] == {"rfd3": True}
+
+
+class TestRequiredCfgKeysStayInSyncWithTheWriters:
+    """The map is hand-written; the writers are the truth. Re-derive and compare, so a
+    new cfg["..."] in a writer cannot reach a user as a KeyError.
+    """
+
+    # Read inside a `cfg.get(...)` guard, so absence is handled, not fatal.
+    _GUARDED: ClassVar = {"pxdesign_output_dir"}
+    # Provided by load_run_config's own validation, checked for every run.
+    _ALWAYS_PRESENT: ClassVar = {"name", "run_dir", "target_pdb_src"}
+
+    _WRITERS: ClassVar = {
+        "bindcraft": ("write_bindcraft_target", "copy_bindcraft_preset", "write_run_bindcraft"),
+        "boltzgen": ("copy_nanobody_scaffolds", "write_boltzgen_yaml", "write_run_boltzgen"),
+        "mosaic": ("write_mosaic_hallucinate", "write_run_mosaic", "hotspots_to_epitope_idx"),
+        "pxdesign_local": ("write_pxdesign_yaml", "write_run_pxdesign"),
+        "proteina_complexa": ("write_run_proteina_complexa",),
+        "rfd3": ("write_run_rfd3",),
+        "protein_hunter": ("write_run_protein_hunter",),
+        "evaluator": ("write_run_evaluate",),
+    }
+
+    @staticmethod
+    def _hard_indexed(fn_name):
+        """cfg["literal"] READS in a writer — the accesses that raise KeyError."""
+        tree = ast.parse(inspect.getsource(getattr(conf, fn_name)))
+        return {
+            node.slice.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "cfg"
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+            and not isinstance(node.ctx, ast.Store)
+        }
+
+    def test_every_tool_is_covered(self):
+        assert set(conf.REQUIRED_CFG_KEYS) == set(self._WRITERS)
+        assert {k for k, *_ in conf.TOOL_SEQUENCE} <= set(conf.REQUIRED_CFG_KEYS)
+
+    @pytest.mark.parametrize("tool", sorted(_WRITERS))
+    def test_map_matches_what_the_writers_actually_read(self, tool):
+        derived = set()
+        for fn_name in self._WRITERS[tool]:
+            derived |= self._hard_indexed(fn_name)
+        derived -= self._ALWAYS_PRESENT | self._GUARDED
+        assert set(conf.REQUIRED_CFG_KEYS[tool]) == derived, (
+            f"REQUIRED_CFG_KEYS[{tool!r}] is out of sync with its writers: "
+            f"missing {sorted(derived - set(conf.REQUIRED_CFG_KEYS[tool]))}, "
+            f"stale {sorted(set(conf.REQUIRED_CFG_KEYS[tool]) - derived)}"
+        )
