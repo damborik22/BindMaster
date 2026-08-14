@@ -1369,3 +1369,80 @@ a live AF2-CPU measurement, into gitignored `Proteina-Complexa/inference/` dirs
 `~/.cache/torch_extensions`. Two adversarial verifiers struck several claims from the first pass,
 including a wrong subcommand count, a stale run inventory, and a binder-chain length quoted as
 fixed when `nres` draws it per sample.
+
+---
+
+## 2026-08-14 — AF3 fits a 24 GB GPU (the ">=100 GB" requirement was a preallocation artifact); compile cache + fixed bucket is 2.3x but moves the scores
+
+**What changed:**
+- **Step A of `docs/PLAN_af3_spark_runbook.md` ran on BM2 (RTX 3090, 24 GB) and passed.** A 258-token
+  complex (ApoE4 NTD 141 aa + PH-v2 binder 117 aa) peaks at **4,430 MiB** and takes 91 s including cold
+  compile (`iptm 0.88`, `plddt_binder 0.952`). A 391-token complex peaks at the **same** 4,430 MiB. A
+  20-design pool (241–286 tokens) ran **20/20 with zero empty rows**. Peak measured with
+  `XLA_PYTHON_CLIENT_PREALLOCATE=false` via a patched runner copy passed with `--scripts-path` —
+  `_build_af3_env` otherwise forces `true`, so the runbook's own Step A command cannot measure a true
+  peak unaided.
+- **The mechanism behind the wrong number was reproduced on the same card:** under the shipped default
+  (`PREALLOCATE=true`, fraction 0.9) AF3 sits at **21,996 MiB for a 4.4 GB working set**. The 2026-06-24
+  entry's *observation* (93.7 of 96 GB on Spark) was right; the inference "therefore AF3 needs >100 GB"
+  was not. Docs corrected across 15 files — the claim had spread well beyond the four the runbook listed.
+- **AF3 now installs on the 24 GB fleet.** No fleet box could run it before: BM4 had the *PyPI*
+  `alphafold3` stub with no jax; BM1/BM2 had nothing. Two build failures, both fixed without sudo —
+  BM1/BM2 needed conda-forge `zlib` (cifpp's `find_package(ZLIB)`); BM4 needed `cxx-compiler` +
+  `binutils` **plus unprefixed `ar`/`ranlib` symlinks**, because conda ships only
+  `x86_64-conda-linux-gnu-ar` and CMake's unprefixed probe returns `CMAKE_AR-NOTFOUND`.
+- **Step E (compile cache + pool-max bucket) implemented and benchmarked.** 20 designs, one GPU, back to
+  back: **70 s (≤256 tokens) / 91 s (>256) → 33–34 s flat**, pool wall 27.6 → 11.9 min (**2.31x**).
+  Compile is the dominant cost, since every binder is a fresh `run_alphafold.py` subprocess.
+
+**Why it mattered:**
+- The ">=100 GB" claim was the reason the >=3-engine gate was Spark-bound. It is now satisfiable on
+  BM1/BM2/BM4, which is worth more than the v3.0.4 upgrade the runbook was written for.
+- The default bucket ladder costs +30% wall clock for the sake of 8 tokens over the 256 boundary.
+
+**The catch — and its refutation (this is the real result):**
+- The two arms disagreed on scores (mean `iptm` 0.615 → 0.584, max |Δ| 0.18), and the first read blamed
+  the bucket. **A determinism control refuted that.** Rerunning the *before config unchanged* on 8 of the
+  same designs reproduced **0/8** exactly: before-vs-before mean |Δ iptm| = **0.0513** against
+  before-vs-after **0.0688** — the same order. Decisive detail: the 122 aa design went
+  **0.77 → 0.59 (control) → 0.59 (after)**; the two runs that *agree* used **different** buckets, the two
+  that *disagree* used the **same** bucket. Bucket is not the driver.
+- **So Step E does not move the scores** — it is a 2.31× speedup with no demonstrated bias, and no
+  "must not straddle" constraint attaches to it.
+- **The bigger finding: our AF3 refolds are not reproducible run-to-run.** 5/8 held to 2 dp on `iptm`
+  (0.86, 0.84, 0.82, 0.48, and 0.77 → 0.76); 3/8 swung hard (0.27 → 0.19, 0.52 → 0.38, 0.77 → 0.59).
+  **Stability does not track confidence cleanly** — one design scoring 0.77 barely moved while another
+  at the same 0.77 fell to 0.59, so "the top of the pool is safe" is NOT supported by this sample.
+  The seed is fixed (`modelSeeds: [1]`), so this is GPU/XLA-level nondeterminism, not a different seed.
+- **Re-measured at the production `--num-samples 5` (3 arms × 8 designs, same box) — and the
+  expectation that 5 samples would average the noise away was WRONG.** mean |Δ iptm| between two
+  identical runs: **0.0563 at 5 samples vs 0.0513 at 1 sample**, max **0.200 vs 0.180**. No
+  improvement. Mechanism: AF3 does not average samples — `_load_top_sample` keeps the **top-ranked**
+  one, an order statistic over 5 stochastic draws, so which sample wins varies per run and the
+  reported value hops between samples. More samples = more chances to hop, not less variance.
+  *Which* designs are unstable also changed with config (1 sample: 105/112/122 aa; 5 samples:
+  122/140/142 aa, where 140/142 had been exactly stable) — a selection effect, not a per-design
+  "this one is marginal" property.
+- **The Step E speedup HOLDS at production settings: 2.15× measured** (105 s → 48.9 s per design),
+  not the 1.24× projected. The projection wrongly assumed diffusion cost scales linearly with
+  `num_samples`; 5 samples costs only ~1.5× one sample (33.5 → 48.9 s) because the trunk runs once.
+  So the fixed ~40 s compile stays dominant and the cache keeps paying.
+- **The number that matters for the campaign:** `af3_iptm` carries **~0.06 mean / 0.20 worst-case
+  run-to-run uncertainty that the production config does not remove.** Designs whose
+  `consensus_iptm_mean` differ by less than that are not distinguished by the metric. AF3 is 1 of 3
+  engines, so the consensus effect is roughly a third of that — *if* the other two are stable, and
+  **nobody has measured Boltz-2 or ESMFold2 reproducibility.** That is the next experiment, and it is
+  a ranking-integrity question rather than an AF3 one.
+
+**Outcome:**
+- Docs corrected; Step A closed. Step E implemented, benchmarked, control-tested, **left uncommitted**
+  pending review — but the case for it is now clean: 2.31× with no score bias.
+- BM2's Mosaic run was paused twice (17:16–17:56 for the benchmark, 18:36–18:47 for the control) and
+  restarted cleanly each time; it resumes from its own checkpoint and the 150 designs on disk were
+  untouched.
+- Next: re-measure the AF3 noise floor at the production `--num-samples 5`; then B → C → D on Spark
+  after the v3.0.4 upgrade.
+
+**Operational note:** `pkill -f <pattern>` over ssh matched *this session's own remote command line*
+twice, killing the shell mid-operation (exit 255) and leaving a job half-dead. Kill by explicit PID, or
+use the `run_stepE[.]sh` bracket trick so the pattern text differs from what it matches.
