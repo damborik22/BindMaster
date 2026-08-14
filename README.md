@@ -295,14 +295,16 @@ Each per-tool run script writes a `runs/<name>/<tool>/settings.json` capturing t
 
 ### `bindmaster evaluate`
 
-Parses design outputs from any combination of tools,
-cross-ranks all designs by a configurable metric, and writes a summary.
+Parses design outputs from any combination of tools, refolds them with independent
+engines, ranks the pool, and writes a report. There is one ranking and no metric to
+choose — see [Ranking metrics](#ranking-metrics) below.
 
 **Refolding engines (canonical pipeline):**
 
 | Engine | CLI subcommand | Env | Where it runs |
 |---|---|---|---|
 | **Boltz-2** | `binder-compare refold-boltz2` | Mosaic `.venv` | Anywhere with a 24 GB GPU |
+| **ESMFold2** | `binder-compare refold-esmfold2` | `binder-eval-esmfold2` conda | Anywhere — lightweight, no gated weights. The default engine (`--tool all`), and the source of the `chain_iptm_interface` gate `autosize` uses. |
 | **AF3 v3.0.2** | `binder-compare refold-af3` | `binder-eval-af3` conda | Any host with ≥100 GB GPU memory — DGX Spark (aarch64), H200 (x86_64), GH200, etc. Full AF3 inference doesn't fit on consumer 24 GB GPUs. |
 
 Cross-engine columns are namespaced (`boltz_pae_*`, `af3_*`, `esmfold2_*`). There is **one ranking and no way to select another**: a cross-engine gate (`--min-engines`, default 3) then `consensus_iptm_mean`, emitted as a single `rank` column. `ipsae_min` (DunbrackLab 2025 formula) and `agreement_count` are diagnostic columns — `agreement_count` in particular is a flat null as a screen (macro-AUC 0.532), so do not gate on it. Part U removed the `--rank-by` / `--screen-metric` flags and the `two_stage_rank` / `adaptyv_rank` / `consensus_rank` / `active_rank` columns; see `docs/INVESTIGATION_partU_cao_benchmark.md`. AF3 and ESMFold2 produce token-order PAE which the evaluator transposes to match Boltz-2's `[binder|target]` order.
@@ -321,6 +323,34 @@ binder-compare run --mosaic runs/PDL1/mosaic --bindcraft runs/PDL1/bindcraft \
 The configurator-generated `runs/<name>/run_evaluate.sh` wraps `Evaluator/evaluate.sh`, which auto-detects the installed engines and drives the whole thing.
 
 Report output lands in `…/evaluate/report/` — `report.html`, `metrics.csv`, and `top20_candidates.csv`.
+
+#### `Evaluator/evaluate.sh` — the orchestrator's own flags
+
+This is the script `run_evaluate.sh` calls, and the one to reach for when re-running a
+step by hand. `bash Evaluator/evaluate.sh --help` prints the same list.
+
+| Flag | Effect |
+|---|---|
+| `--sequences` / `--target-seq` / `--output` | Required: binder FASTA (or CSV / one-per-line), the full target sequence, the output directory |
+| `--min-engines N` | How many independent engines must have refolded a design for it to be eligible for the ranking. Default 3 = all of Boltz-2 / AF3 / ESMFold2; floor 2. Designs below the gate are ranked **last, not dropped**. Never lowered automatically — see the warning note below |
+| `--skip-boltz2` / `--skip-af3` / `--skip-esmfold2` | Skip an engine. Each is otherwise auto-detected from its conda env and skipped with a `[note]` if absent |
+| `--af3-env` / `--esmfold2-env` / `--soluprot-env` / `--bindcraft-env` | Override the conda env name for that step |
+| `--esmfold2-model full\|fast` | ESMFold2 checkpoint (default `full`) |
+| `--skip-soluprot` / `--soluprot-threshold N` | Control the solubility screen (default threshold 0.5, the paper value) |
+| `--soluprot-filter` | **Drop** sub-threshold designs from the FASTA before any refolding, saving GPU time. Off by default — the score lands in the report either way |
+| `--primary-engine boltz\|af3\|esmfold2` | Which engine's metrics are promoted as primary (default `boltz`) |
+| `--epitope-residues LIST` | Compute `epitope_match_fraction` inline against intended hotspots, e.g. `'15,18,232'`. Cheap, no extra pass |
+| `--with-affinity` | Opt-in: after the report, run the \|dG/dSASA\| affinity ranking (Rosetta, BindCraft env) on the top 20 and regenerate |
+| `--monomer-dir DIR` | Opt-in: binder-alone structures for the context-dependent-fold check (`fold_robust`) |
+| `--allow-no-msa` | Proceed when the shared target MSA cannot be fetched. Default is to abort: one engine folding single-sequence while the others use an MSA produces scores that are not comparable, and the ranking averages across engines |
+| `--resume` | Resume an interrupted run |
+
+> **The gate defaults to 3, and most hosts run two engines.** AF3 needs >100 GB of GPU
+> memory, so a typical box runs Boltz-2 + ESMFold2 and *every* design fails a gate of 3.
+> `evaluate.sh` counts the engines it will actually run and warns **before** any GPU
+> time, naming the flag: pass `--min-engines 2`. It is never lowered for you — deriving
+> the gate from whatever happens to be installed would make two operators with the same
+> designs produce different rankings.
 
 #### All `binder-compare` subcommands
 

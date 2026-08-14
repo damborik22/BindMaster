@@ -74,3 +74,53 @@ def test_the_table_invents_nothing():
         f"README.md documents {extra}, which argparse does not accept — a reader "
         f"following the table gets 'invalid choice' and exit 2."
     )
+
+
+# --- Evaluator/evaluate.sh ----------------------------------------------------
+
+_EVALUATE_SH = _ROOT / "Evaluator" / "evaluate.sh"
+_EVALUATE_HEADING = "#### `Evaluator/evaluate.sh` — the orchestrator's own flags"
+# Self-documenting flags, excluded from the table on purpose.
+_SELF_EVIDENT = {"-h", "--help", "-o"}
+
+
+def _evaluate_sh_flags() -> set[str]:
+    """Flags evaluate.sh's parse loop has a `case` arm for — the real acceptance list."""
+    lines = _EVALUATE_SH.read_text().splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("while [[ $# -gt 0 ]]"))
+    end = next(i for i, ln in enumerate(lines[start:], start) if ln.strip() == "done")
+    flags: set[str] = set()
+    for line in lines[start + 1 : end]:
+        if line.lstrip().startswith("#"):
+            continue
+        m = re.match(r"^\s*([^\s)(]+(?:\|[^\s)(]+)*)\)", line)
+        if m:
+            flags.update(tok for tok in m.group(1).split("|") if tok.startswith("-"))
+    return flags - _SELF_EVIDENT
+
+
+def _evaluate_sh_documented() -> set[str]:
+    text = _README.read_text()
+    start = text.index(_EVALUATE_HEADING)
+    rest = text[start + len(_EVALUATE_HEADING) :]
+    end = re.search(r"^#{1,4} ", rest, re.M)
+    return set(re.findall(r"`(--[a-z0-9-]+)", rest[: end.start()] if end else rest))
+
+
+def test_the_evaluate_sh_table_exists():
+    assert _EVALUATE_HEADING in _README.read_text()
+    assert len(_evaluate_sh_documented()) > 5
+
+
+def test_every_evaluate_sh_flag_is_documented():
+    """`run_evaluate.sh` wraps this script, so it is what operators actually run — and
+    8 of its flags appeared nowhere in the README, including the cross-engine gate."""
+    missing = sorted(_evaluate_sh_flags() - _evaluate_sh_documented())
+    assert not missing, f"Evaluator/evaluate.sh accepts {missing} but README.md does not document them."
+
+
+def test_the_evaluate_sh_table_invents_nothing():
+    extra = sorted(_evaluate_sh_documented() - _evaluate_sh_flags())
+    assert not extra, (
+        f"README.md documents {extra} for evaluate.sh, which its parser rejects with 'Unknown argument' and exit 1."
+    )
