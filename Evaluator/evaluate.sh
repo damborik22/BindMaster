@@ -154,7 +154,7 @@ echo ""
 if [[ $SKIP_AF3 -eq 0 ]]; then
     if ! conda env list 2>/dev/null | awk '{print $1}' | grep -qx "${AF3_ENV}"; then
         echo "[note] conda env '${AF3_ENV}' not found — AF3 refolding will be skipped."
-        echo "        (requires >100 GB unified/device memory; see Evaluator/envs/binder-eval-af3.yml)"
+        echo "        (install with 'bindmaster install --tool af3'; runs on 24 GB GPUs — see Evaluator/envs/binder-eval-af3.yml)"
         echo ""
         SKIP_AF3=1
     fi
