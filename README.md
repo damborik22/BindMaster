@@ -527,43 +527,50 @@ non-LLM operability, and GUI options — is at
 **[docs/repo_analysis_2026-07-26.html](docs/repo_analysis_2026-07-26.html)**
 (31 findings with file:line and a suggested fix order).
 
-The items below are the ones you are most likely to hit while following this README.
-Finding IDs refer to that document.
+Every finding that document raised against the quick-start path (F1, F2, F3, F5, F8,
+F9, F15, F20, F33, F34, F38, F40, F41) has since been fixed, and the tables that
+listed them as live issues have been removed rather than left to mislead. Read the
+audit as a record of what was wrong, not as current behaviour.
 
-### Following the quick start
+The items below are what is still true today.
 
-| Symptom | Cause | Workaround |
-|---|---|---|
-| `run_all.sh` prints *"Mosaic requires interactive input"* and exits 1 before any tool runs | The Mosaic block is emitted first and hard-exits unless `mosaic/designs.csv` already exists (F8) | Run `bash runs/<name>/run_mosaic.sh` first, then `run_all.sh`; or disable Mosaic in the wizard |
-| Answering *y* to "Run the pipeline now?" never runs RFD3 or Protein-Hunter | `run_pipeline()` dispatches Mosaic, BoltzGen, BindCraft, PXDesign and Proteina-Complexa, but has no branch for RFD3 or Protein-Hunter. They are also absent from the Step 7 preview tree and the "To run later" list (F9) | Run `bash runs/<name>/run_rfd3.sh` / `run_protein_hunter.sh` by hand, or `run_all.sh` (which does cover all seven — with the Mosaic caveat above) |
-| A run script dies immediately with `nvidia-smi: command not found` | The `settings.json` provenance block runs `nvidia-smi` unguarded under `set -euo pipefail` (F15) | Run on a node where `nvidia-smi` is on `PATH`, and check `--gpu-id` is a real device index |
-| RFD3 finished but contributes no designs to the report | `run_evaluate.sh` points `--rfd3` at `rfd3/outputs`, while `run_rfd3.sh` writes `rfd3/sequences.csv` (F3) | Pass `--rfd3 runs/<name>/rfd3` to `binder-compare extract` yourself |
-| `binder-compare run --rfd3 …` is rejected by argparse | `run` accepts only `--bindcraft`, `--boltzgen`, `--mosaic`, `--pxdesign` — RFD3, Protein-Hunter and Proteina-Complexa are `extract`-only (F38) | Use `binder-compare extract` (which accepts all seven) followed by the refold + `report` steps, or `runs/<name>/run_evaluate.sh` |
-| A mistyped tool directory produces a report that looks complete | `extract` treats a per-tool yield of 0 as non-fatal and exits 0; only an all-empty result fails (F40) | Check the `→ N sequences` line for every tool before starting the refold |
-| `binder-compare refold-af2` → `invalid choice` | `Evaluator/README.md` and `docs/pipeline_reference.md` still document the `refold-af2` subcommand and `binder-eval-af2` env, both removed in Part I (F41) | AF2 refolding no longer exists; use Boltz-2 / AF3 / ESMFold2 |
+### Live issues
+
+- **The configurator aborts with a Python traceback if an enabled tool is not
+  installed.** Step 5 shows each tool's install status but does not stop you enabling
+  one that is missing, and the generators read that tool's files unguarded —
+  `BindCraft/settings_filters/*.json`, `Mosaic/examples/bindmaster_examples/hallucinate_bindmaster.py`.
+  Worse, `runs/<name>/config.json` is written *last*, so a crash mid-generation loses
+  every wizard answer along with the partially-written run directory. Enable only tools
+  that report `installed`, and keep a copy of `config.json` from a previous run.
+- **`configurator --config` does not validate the config.** It checks `name`,
+  `run_dir` and `target_pdb_src`; roughly fifty further keys are read directly, so a
+  hand-edited or hand-written config fails with a bare `KeyError` (e.g.
+  `KeyError: 'boltzgen_intermediate'`) partway through generation. Replay a config the
+  wizard wrote, and edit values rather than removing keys.
+- **`evaluate.sh` has no `--min-engines` passthrough, and the gate defaults to 3.**
+  On a host without AF3 — the common case, since AF3 needs >100 GB of GPU memory —
+  only Boltz-2 and ESMFold2 run, so *every* design fails the cross-engine gate and is
+  ranked last. The report warns when this happens. To rank on two engines, re-run the
+  report step by hand: `binder-compare report --min-engines 2 …`.
+- **The TUI's "Evaluate results" entry is a dead end.** It invokes `bindmaster evaluate`
+  with no arguments, which argparse rejects with a usage error. Use
+  `bindmaster evaluate <subcommand>` from the shell, or `runs/<name>/run_evaluate.sh`.
 
 ### Correctness caveats worth knowing
 
-- **mmCIF targets ignore your chain answer (F1).** For a `.cif` / `.mmcif` input,
-  `extract_sequence_from_cif` reads `_entity_poly` first, which is chain-agnostic and
-  picks the **longest** polymer entity — so on a multi-chain structure the target
-  sequence may not be the chain you selected. Prefer `.pdb` input, or verify
-  `runs/<name>/*/settings.json` shows the target length you expect before committing GPU time.
-- **Mosaic hotspots resolve against chain A (F2).** The epitope-index helper reads
-  `cfg["target_chain"]` / `cfg["chain"]`, neither of which the wizard sets, so it always
-  falls back to `"A"`.
-- **Designs refolded by only one engine are ranked against 3-engine designs (F5).**
-  `consensus_iptm_mean` skips missing engines, and the two-stage sort does not gate on
-  `consensus_iptm_n`. Check that column before trusting a top-ranked design.
-- **The report's 3D viewer needs internet (F20).** `report.html` loads NGL from
-  `unpkg.com`, so the structure viewer is blank on an air-gapped node even though
-  `Evaluator/tools/ngl/` is vendored.
-- **AF3's per-engine ipSAE is missing from `top30_candidates.csv` (F33).** The shortlist
-  reads `af3_pae_ipsae_min`, but the writer emits `af3_ipsae_min`, so that column is
-  silently absent. Read it
-  from `metrics.csv` under the correct names.
-- **`wetlab_recommended` is always `False` on a single-engine install (F34).** The gate
-  requires `agreement_count >= 2`, which is unreachable when only Boltz-2 is present.
+- **The ranking is computed from PAE `.npy` files, not from the CSV's `iptm` column.**
+  If a results directory is separated from the refold CSVs that reference it (a
+  `fleet.sh fetch`, an archived run, a CSV copied on its own), the per-engine ipTM and
+  ipSAE columns cannot be recomputed. The report says so — `[pae] N/N PAE files … were
+  not found`, then `[rank] NO engine ipTM was available` — and the resulting `rank`
+  column carries no cross-engine signal. Move the whole `evaluate/` directory, not just
+  the CSVs.
+- **The ranking is a triage filter, not a decision procedure.** On a realistic
+  same-target, same-tool pool (Cao 2022: 4,442 designs, 12 targets) the top decile is
+  worth roughly 1.5–2× enrichment, and it beats a random ordering on only 6 of 12
+  targets. It ranks binder-vs-non-binder confidence, never affinity among binders.
+  See Part U in [CHANGELOG.md](CHANGELOG.md).
 
 ### Running without an LLM
 

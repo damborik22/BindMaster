@@ -6,6 +6,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed (2026-08-14 — two silent failures in the terminal path: a void ranking, and a pipeline that stopped at the first casualty)
+
+Both found by driving the non-agent path end to end (`configure --config` → generated
+run scripts → `extract` → `report`) on synthetic data. Neither is reachable from the
+unit tests as they stood, and neither announced itself at runtime.
+
+- **A report built without its PAE files produced a `rank` column that ranked nothing, silently.**
+  Every `{engine}_pae_iptm` — the sole input to `consensus_iptm` / `consensus_iptm_mean`,
+  i.e. the whole ranking — is recomputed from the `.npy` PAE matrices named in the refold
+  CSVs, *not* from the CSV's own `iptm`. When those paths did not resolve, all three
+  loaders appended NaN and moved on without a word, and `rank_designs`' "nothing cleared
+  the gate" warning was guarded by `cons.notna().any()`, which is false precisely when
+  *no* engine scored *anything*. Result: exit 0, a full `metrics.csv` and `report.html`,
+  `passes_engine_gate` False on every row, `consensus_iptm_mean` empty — and `rank`
+  populated 1..N from the tiebreakers alone. This is the shape of a results directory
+  separated from its CSVs (a `fleet.sh fetch`, an archived run, a CSV copied on its own).
+  `add_boltz_ipsae_from_files`, `add_ipsae_from_pae_files` and `add_iptm_from_pae_files`
+  now emit one aggregate `[pae] N/M PAE files … were not found` per call (not per row — a
+  real pool is thousands of designs), naming the column and the `base_dir` that was tried;
+  a blank path is still not counted, since that means the engine never folded that design.
+  `rank_designs` gained the zero-coverage branch the existing test could not reach.
+- **One tool's failure ended the whole campaign.** `run_all.sh` ran under `set -euo
+  pipefail` with a bare `"$RUN_DIR/run_<tool>.sh"` per step and a `check_outputs … exit 1`
+  after each, so a BoltzGen OOM at hour 2 aborted the script: RFD3 and Protein-Hunter
+  never started, and the Evaluator never ran on the designs that *had* finished. The
+  Mosaic block already carried this fix and the comment explaining why; it now applies to
+  every step. Each tool runs through a `run_tool` helper that records the failure and
+  returns, the Evaluator reports on whatever completed, and the script exits non-zero at
+  the end naming every failed step. Because a failed tool leaves an empty output dir and
+  `extract` treats that as fatal (deliberately — a mistyped path must not silently shrink
+  the pool), `run_all.sh` exports `BINDMASTER_ALLOW_EMPTY=1` when it knows a tool died;
+  `run_evaluate.sh` passes `--allow-empty` only then, so a hand-run evaluation stays
+  strict. An entirely empty pool still errors inside `extract`.
+
+### Fixed (2026-08-14 — docs: the Known-issues list had outlived every issue in it)
+
+`README.md` listed thirteen findings (F1, F2, F3, F5, F8, F9, F15, F20, F33, F34, F38,
+F40, F41) as live defects with workarounds. All thirteen were verified fixed in the
+current tree — `run` accepts all seven tools, `run_evaluate.sh` points `--rfd3` at the
+directory `run_rfd3.sh` writes, `extract` errors on a per-tool yield of zero, NGL is
+inlined from the vendored copy, the ranking gates on `consensus_iptm_n`, and so on — so
+a reader was being told to apply workarounds for problems that no longer exist. The
+tables are replaced by what is actually true today (the configurator's traceback-on-
+missing-tool, the unvalidated `--config` replay, `evaluate.sh` having no `--min-engines`
+passthrough, the TUI's dead-end Evaluate entry) plus the PAE caveat above.
+
+Also corrected: `CLAUDE.md`'s Evaluate section documented `bindmaster evaluate
+runs/<name>`, `--metric`, `--top`, `--refold` and `--target`, none of which have existed
+since `evaluate` became a `binder-compare` passthrough — argparse rejects all of them;
+`CLAUDE.md`'s status line stopped at Part M (master is through Part U) and pointed at
+the pre-rename repository URL; `install.sh --help` omitted `soluprot` from the `--tool
+all` list it *is* in, called it "opt-in only" and "x86 only (USEARCH dep is x86 binary)"
+with TMHMM/drive5.com download instructions, when both platforms build open-source
+USEARCH v12 from source and the shipped `--no_tmhmm` model needs neither; and
+`bindmaster --help` still advertised `--tool bindcraft|boltzgen|mosaic|all` out of
+eleven valid values.
+
 ### Fixed (2026-07-29 — candidates.csv: every cell now describes the sequence in its own row)
 
 Follow-on to the shortlist fixes below, all found by reading the shipped CALCA top-50 file. The common defect: a cell was resolved through `design_group`, so it printed a number belonging to a **sibling** — a different MPNN sequence of the same backbone.
