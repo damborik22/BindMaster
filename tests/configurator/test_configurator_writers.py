@@ -335,6 +335,82 @@ class TestToolSequenceCoverage:
         assert "SKIPPED" in mosaic_block
 
 
+class TestRunAllIsolatesToolFailures:
+    """One tool dying must not cost the campaign the other six.
+
+    These tools run for hours to days and fail independently (OOM, missing weights,
+    a bad checkpoint). Under `set -e` plus a per-tool `check_outputs … exit 1`, a
+    BoltzGen crash at hour 2 aborted the script: RFD3 and Protein-Hunter never
+    started, and the Evaluator never ran on the designs that HAD finished. The same
+    reasoning already fixed the Mosaic block above; it applies to every step.
+    """
+
+    def _content(self, base_cfg, tmp_path):
+        script = tmp_path / "run_all.sh"
+        conf.write_run_all(script, base_cfg, _ALL_SEVEN)
+        return script.read_text()
+
+    @staticmethod
+    def _code(text):
+        """Executable lines only — the rationale comments talk *about* `exit 1`."""
+        return "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+
+    def test_no_set_e(self, base_cfg, tmp_path):
+        content = self._content(base_cfg, tmp_path)
+        assert "set -euo pipefail" not in content
+        assert "set -uo pipefail" in content
+
+    def test_no_step_exits_early(self, base_cfg, tmp_path):
+        """The only `exit 1` left is the final summary, after every step has run."""
+        code = self._code(self._content(base_cfg, tmp_path))
+        body, _, tail = code.rpartition("if [ ${#FAILED[@]} -gt 0 ]; then")
+        assert "exit 1" not in body, "a step still aborts the pipeline"
+        assert "exit 1" in tail, "the script must still exit non-zero when a step failed"
+
+    def test_every_tool_runs_through_the_isolating_helper(self, base_cfg, tmp_path):
+        content = self._content(base_cfg, tmp_path)
+        for label in ("BoltzGen", "BindCraft", "PXDesign", "Proteina-Complexa", "RFD3", "Protein-Hunter"):
+            assert f'run_tool "{label}"' in content, f"{label} is not failure-isolated"
+        assert "check_outputs" not in content, "the aborting helper should be gone"
+
+    def test_helper_records_failures_instead_of_exiting(self, base_cfg, tmp_path):
+        content = self._content(base_cfg, tmp_path)
+        helper = content[content.index("run_tool() {") : content.index("\n}\n")]
+        assert not [ln for ln in helper.splitlines() if ln.strip().startswith("exit")]
+        assert 'FAILED+=("$label")' in helper
+
+    def test_evaluator_still_runs_after_a_tool_failed(self, base_cfg, tmp_path):
+        content = self._content(base_cfg, tmp_path)
+        evaluator_block = content[content.index("=== Step: Evaluator ===") :]
+        # Not guarded by a success condition — it reports on whatever completed.
+        assert 'if ! "$RUN_DIR/run_evaluate.sh"; then' in evaluator_block
+        assert "BINDMASTER_ALLOW_EMPTY=1" in evaluator_block
+
+    def test_exits_non_zero_naming_the_failed_steps(self, base_cfg, tmp_path):
+        content = self._content(base_cfg, tmp_path)
+        assert "${FAILED[*]}" in content
+        assert content.rstrip().endswith('echo "=== Pipeline complete! ==="')
+
+
+class TestRunEvaluateAllowsEmptyOnlyWhenToldTo:
+    """`extract` errors on a tool directory that yields nothing, so a mistyped path
+    cannot silently shrink the pool before hours of GPU refolding. Correct standalone;
+    wrong when run_all.sh already knows a tool died and wants the rest reported on."""
+
+    def test_extract_honours_the_env_var(self, base_cfg, tmp_path):
+        script = tmp_path / "run_evaluate.sh"
+        conf.write_run_evaluate(script, base_cfg, _ALL_SEVEN)
+        assert "${BINDMASTER_ALLOW_EMPTY:+--allow-empty}" in script.read_text()
+
+    def test_strict_by_default(self, base_cfg, tmp_path):
+        """Unset means no flag: the guard stays on for a hand-run evaluation."""
+        script = tmp_path / "run_evaluate.sh"
+        conf.write_run_evaluate(script, base_cfg, _ALL_SEVEN)
+        content = script.read_text()
+        assert "--allow-empty \\" not in content
+        assert "\n        --allow-empty\n" not in content
+
+
 class TestRunEvaluateRfd3Path:
     def test_rfd3_extractor_points_at_the_dir_run_rfd3_writes(self, base_cfg, tmp_path):
         """run_rfd3.sh writes rfd3/sequences.csv; the flag used to point at
