@@ -109,13 +109,15 @@ We set `XLA_PYTHON_CLIENT_MEM_FRACTION`; AF3's docs and issue #596 use
 `XLA_CLIENT_MEM_FRACTION` (no `PYTHON_`). Checking jaxlib settled it:
 
 ```python
-memory_fraction = os.getenv('XLA_CLIENT_MEM_FRACTION', '')
-deprecated_memory_fraction = os.getenv('XLA_PYTHON_CLIENT_MEM_FRACTION', '')
+memory_fraction = os.getenv("XLA_CLIENT_MEM_FRACTION", "")
+deprecated_memory_fraction = os.getenv("XLA_PYTHON_CLIENT_MEM_FRACTION", "")
 if deprecated_memory_fraction:
     if memory_fraction:
-        raise ValueError('XLA_CLIENT_MEM_FRACTION is specified together '
-                         'with XLA_PYTHON_CLIENT_MEM_FRACTION. '
-                         'Remove the latter one, it is deprecated.')
+        raise ValueError(
+            "XLA_CLIENT_MEM_FRACTION is specified together "
+            "with XLA_PYTHON_CLIENT_MEM_FRACTION. "
+            "Remove the latter one, it is deprecated."
+        )
 ```
 
 So the legacy name is **still read** — the guard was never at risk of silently

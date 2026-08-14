@@ -204,8 +204,10 @@ These compose: one fixed bucket → identical shapes across the pool → cache h
 Prototype by adding to the `cmd` list in `_run_single`:
 
 ```python
-f"--jax_compilation_cache_dir={cache_dir}",
-f"--buckets={target_len + binder_len}",
+cmd += [
+    f"--jax_compilation_cache_dir={cache_dir}",
+    f"--buckets={target_len + binder_len}",
+]
 ```
 
 *Measure:* wall-clock per design over a ≥20-design pool, before vs after.
