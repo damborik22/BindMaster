@@ -1446,3 +1446,88 @@ fixed when `nres` draws it per sample.
 **Operational note:** `pkill -f <pattern>` over ssh matched *this session's own remote command line*
 twice, killing the shell mid-operation (exit 255) and leaving a job half-dead. Kill by explicit PID, or
 use the `run_stepE[.]sh` bracket trick so the pattern text differs from what it matches.
+
+---
+
+## 2026-08-16 — Composition collapse is invisible to the whole funnel, and it shipped in the gene order; a skipped preflight destroyed a live experiment
+
+**What changed:**
+- **Audited every ApoE4-isoform pool for sequence complexity, and the pathology is campaign-wide.**
+  Already known for RFD3 (`--temperature 0.1`, no bias → ~50 % Ala). It is not an RFD3 quirk:
+  PXDesign v3 **0.329** mean alanine with **42.7 %** of designs above 35 %, Proteina-Complexa v4
+  **0.306** / 36.8 %, BoltzGen v3 **0.218** / 20.0 %. BindCraft v4 (0.051) and fixed-RFD3 (0.102) are
+  clean. Reported alongside Shannon entropy of composition `H` (natural proteome 2.89) because
+  alanine alone is the wrong yardstick — see the arm test below.
+- **It reached the order.** The 63 AF3-selective pool sits at ala **0.327 / 41.3 %** and the 10 ordered
+  genes at **0.247 / 20.0 %**. Per-design, one gene is genuinely bad: **`ApoE4iso_03_RFD3`, 47.9 %
+  alanine, H 1.81**, from the *unfixed* RFD3 pool. Deliverables are self-consistent
+  (`ORDER_10_genes.fasta` == `ORDER_10_final.csv` on all 10); only the intermediate `order10.fasta` is
+  stale, predating the slot-4 swap.
+- **Screened the 8 fixed-RFD3 AF3-selectives as replacements** (ESMFold2 ×3 isoforms, SoluProt,
+  TmProt, monomer folds). One is **GOLD**: `rfd3fix_655` — af3 0.88 / gaps **0.56**/**0.71**, esm
+  0.70 / gaps **0.54**/**0.60**, ala **0.091**, Tm **75.2 °C**. Against the incumbent's 0.90 /
+  0.30 / 0.36 and esm gaps **0.158**/0.189 — the incumbent scrapes the 0.15 Gold bar by 0.008; the
+  candidate clears it 3.6×. Swap recommended, held until the monomer check (the screen that overturned
+  slot 4 at RMSD 7.49 Å).
+- **PXDesign v3: MPNN re-run, not a composition filter.** Chain B of all 39,000 backbones is pure
+  poly-glycine (N/CA/C/O), so redesign loses nothing; filtering at ala ≤ 0.25 would keep 27 % and
+  delete the L60 arm (445 of 13,000 survive).
+
+**Why it mattered:**
+- **No engine in the stack penalises low-complexity sequence.** Boltz-2, AF3 and ESMFold2 all score a
+  half-alanine helix as a confident interface, so such a design gates, counter-screens, tiers GOLD and
+  reaches a gene order with nothing objecting. Every guard we have is a *structure-confidence* guard.
+- This also explains an old observation rather than adding a new one: 62 % of the original RFD3
+  selectives were >35 % Ala versus 0 % of the fixed ones, yet the selective *rate* barely moved
+  (4.72 % → 3.41 %, z=1.87, n.s.). Fixing composition does not find more hits — it makes the hits
+  orderable. Composition is an **orderability** axis, not a discovery axis.
+
+**The result that changed the recipe:**
+- Transferring the validated RFD3 fix verbatim to PXDesign backbones **would have been wrong**, and
+  measuring only alanine would have hidden it. On 30 backbones (10 each L60/L80/L100):
+
+  | arm | ala | E+R | H | eff types |
+  |---|---|---|---|---|
+  | RFD3 fixed (target; produced 8 AF3-selectives) | 0.102 | 0.280 | **2.59** | 13.4 |
+  | A — `T=0.25, ALA −1.5` (RFD3 recipe verbatim) | 0.047 | **0.375** | 2.45 | 11.6 |
+  | B — `T=0.30, ALA −1.0` | 0.077 | 0.354 | 2.47 | 11.8 |
+  | **C — `T=0.25, ALA −1.5, GLU −0.6, ARG −0.6`** | 0.052 | 0.153 | **2.59** | 13.3 |
+
+  Arm A posts the *best* alanine number and the *worst* complexity of the three — it relocates the
+  collapse from poly-Ala to poly-Glu (E 24.6 %). PXDesign's backbones are pure helical bundles, so
+  MPNN biased off Ala falls back on the charged helix set. Arm C matches the validated pool's entropy
+  to two decimals, which is the non-arbitrary target: not "better composition", but *the same
+  complexity as the pool that already worked*.
+- Corollary for the screens: `rfd3fix_727` led on AF3 gaps (0.70/0.40) and dropped to SILVER once
+  ESMFold2 ran (0.04/0.04). Screen before recommending, not after.
+
+**The mistake — a skipped preflight destroyed a running experiment:**
+- 16 MPNN workers were launched on BM5 sized off their **GPU** footprint (339 MiB). Real host RSS is
+  **3.06 GB each = 49 GB**. BM5 fell from 115 GB available to 24 GB, and the watchdog in
+  `repro_check/run_repro_capped.sh` (`FLOOR_GB=25`) killed **3 of that experiment's 4 arms** (rc=137).
+  A run-to-run reproducibility control needs both arms of a pair, so one surviving arm is worthless
+  and the whole thing re-runs. It then logged `REPRO2 ALL DONE`.
+- Seven minutes later ESMFold2 was launched on the same box **with no check at all**, and was
+  OOM-killed too.
+- Three compounding details, each now written down:
+  - **GPU memory is not host RSS** (339 MiB vs 3.06 GB — a 9× error).
+  - **RSS is not the footprint either.** JAX preallocates unified memory that never appears in RSS:
+    `fold_monomers.py` showed 8.5 GB RSS while MemAvailable fell to 15 GB of 121 GB. Two JAX jobs
+    cannot share BM5 at all.
+  - **A floor declared inside a script is invisible.** `FLOOR_GB=25` was a bash variable nothing else
+    could read.
+- `tools/preflight.sh` now exists and is mandatory (playbook §4bis.4): `measure` (peak RSS **and**
+  MemAvailable drop, plans on the larger), `check` (exits non-zero on insufficient headroom or any
+  declared floor), `declare`/`release` (publish a floor so the next launch is refused rather than
+  landing on it). Verified against the actual culprit — `measure` returns 3.06 GB and projects
+  49 GB for 16 workers, which plus the repro floor would have refused the launch.
+- Two cleanup traps, both cost a cycle: `pkill -f` on `xargs -P N` workers freed nothing because
+  xargs respawns each slot (25 GB → 55 GB in seconds; kill the **process group**), and bracketing
+  did **not** defeat the `pkill` self-match a third time — `pkill -f '[c]hain_after_screens.sh'`
+  killed the controlling shell because the same command line also contained
+  `cat > chain_after_screens.sh`. Kill by PID; give replacements a different filename.
+
+**Open:** gating all 39,000 redesigned PXDesign sequences is ~6 days on three machines — shard it and
+read the survivor rate off the first ~6,000 first. Round-2 E2 counter-screen finishes ~08-17 06:00
+(monitor the PDB count in `cs_E2/struct/`; this arm's CSV is not written incrementally). Whether the
+round-2 report should carry a composition column so this cannot recur silently is a live decision.
