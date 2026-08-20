@@ -145,6 +145,33 @@ This step is cheap and it is the gate on everything below it.
 
 ## Step C — can we delete the Spark workaround? (Spark, v3.0.4)
 
+> ## ⛔ DO NOT RUN THIS STEP AS WRITTEN ON BM5 (added 2026-08-19)
+>
+> The recipe below is **AF3's guidance for a discrete GPU**, where device VRAM
+> oversubscribes into *separate* host RAM. **GB10 has no separate host RAM** —
+> `cudaMemGetInfo` total is 121.69 GiB, which is exactly `SC_PHYS_PAGES`.
+>
+> `TF_FORCE_UNIFIED_MEMORY=true` switches XLA's arena formula (verified in
+> `xla/pjrt/gpu/gpu_helpers.cc`) from `total * fraction` to
+> **`total * fmax(1.0, fraction)`**. With `XLA_CLIENT_MEM_FRACTION=3.2` that
+> targets **3.2 x 121.7 GiB = 389 GiB on a 128 GB machine**.
+>
+> Combined with `PREALLOCATE=false` it does not grab 389 GiB at once — it is
+> worse: it leaves **no ceiling below the machine's own capacity**, so the job
+> grows until the OS starves. That is the exact mechanism that hard-rebooted
+> this box on 2026-08-18 (`NV_ERR_NO_MEMORY` / `_memdescAllocInternal`), and the
+> failure mode of `pytorch/pytorch#174358`, filed against this same hardware.
+>
+> The step's own "*Fail (hang / fragment / reboot)*" branch is therefore not a
+> risk — it is close to the expected outcome.
+>
+> **Run it only under a CUDA MPS device-memory cap**, which makes the failure a
+> clean per-process `RESOURCE_EXHAUSTED` instead of a power cycle:
+> `tools/gpu_mem_guard.sh verify` first, then run the step inside
+> `tools/gpu_mem_guard.sh run 16G -- <command>`.
+> See `docs/PLAN_bm5_unified_memory.md`.
+
+
 Tests whether v3.0.4's "Blackwell GPU unified memory support fixes" resolve
 what we worked around in `refold_af3.py`, and what upstream
 [#596](https://github.com/google-deepmind/alphafold3/issues/596) reports on a

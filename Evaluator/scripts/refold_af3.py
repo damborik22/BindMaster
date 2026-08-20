@@ -334,6 +334,78 @@ def _run_single(
     return _load_top_sample(output_dir, job_name)
 
 
+# Absolute reserve, in GiB, that the default fraction aims for.
+#
+# MEASURED 2026-08-20 on BM5 (GB10, 121.7 GiB unified): a 340-token complex
+# (PD-L1 220 aa + 120 aa binder) peaks at 7,759 MiB of GPU and 14.1 GiB of total host
+# footprint, and completes under an 8 GiB MPS cap (iptm 0.9100).  12 GiB is ~1.5x that.
+#
+# This replaces a provisional 80.0, which was chosen on 2026-08-18 to stay clear of a
+# boundary we had not yet measured.  80 GiB is ~10x the real demand and made the box
+# unshareable for no benefit; the hard ceiling is now the MPS per-client cap
+# (tools/gpu_mem_guard.sh), not this number.  Override with AF3_XLA_MEM_FRACTION.
+_AF3_TARGET_RESERVE_GIB = 12.0
+# Never leave a unified-memory host less than this.  40, not 24: the 2026-08-18 BM5
+# reboot happened with ~24 GB nominally free, so 24 is a measured FAILURE point, not a
+# safe floor.  On a 121 GB GB10 this caps the reserve at 81 GB.
+_AF3_MIN_OS_GIB = 40.0
+
+
+def _default_mem_fraction() -> str:
+    """Pick the XLA preallocation fraction from the ACTUAL pool size.
+
+    A fixed fraction is the wrong unit on unified memory.  AF3's working set is a constant
+    ~4.4 GB no matter how big the machine is, so a fraction makes a LARGER host reserve
+    MORE and therefore be MORE likely to die -- the opposite of what a safety cap should
+    do.  The previous hard-coded 0.8 was written assuming a ~96 GB pool ("~77 GB on
+    Spark"); on a 121 GB GB10 it reserves 97 GB and leaves the OS 24 GB.
+
+    Cost of getting this wrong, observed 2026-08-18 on BM5: AF3 preallocated 99,960 MiB,
+    the kernel logged `NVRM: Out of memory [NV_ERR_NO_MEMORY]` every ~65 s for nine
+    minutes, and the box hard-rebooted after 22 days of uptime, killing the run.
+
+    Discrete-GPU hosts are unaffected in practice: on a 24 GB card this returns 0.67
+    (16 GiB), close to the old 0.8, and a runaway there can only kill the GPU context.
+    """
+    try:
+        import ctypes
+
+        free = ctypes.c_size_t()
+        total = ctypes.c_size_t()
+        libs = ("libcudart.so", "libcudart.so.12", "libcudart.so.13")
+        pool_gib = 0.0
+        for lib in libs:
+            try:
+                rt = ctypes.CDLL(lib)
+            except OSError:
+                continue
+            if rt.cudaMemGetInfo(ctypes.byref(free), ctypes.byref(total)) == 0 and total.value:
+                pool_gib = total.value / (1024**3)
+                break
+        if pool_gib <= 0:  # no CUDA runtime reachable -- fall back to system RAM
+            pool_gib = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1024**3)
+        if pool_gib <= 0:
+            return "0.8"
+
+        # Is this pool UNIFIED (GPU memory == system RAM, e.g. GB10/Grace-Hopper)?  Only
+        # then does an over-reservation starve the OS.  On a discrete card the OS needs
+        # none of the GPU's RAM, so the old near-0.8 behaviour is correct there -- and
+        # applying the OS floor to a 24 GB card would drive the fraction to 0.02
+        # (0.5 GB), below the ~4.4 GB working set, OOM-ing every design.
+        ram_gib = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1024**3)
+        unified = ram_gib > 0 and abs(pool_gib - ram_gib) / ram_gib < 0.2
+
+        frac = _AF3_TARGET_RESERVE_GIB / pool_gib
+        if unified:
+            frac = min(frac, max(0.0, (pool_gib - _AF3_MIN_OS_GIB) / pool_gib))
+        else:
+            frac = max(frac, 0.5)      # discrete: keep plenty of card for big complexes
+        frac = max(0.02, min(frac, 0.8))
+        return f"{frac:.3f}"
+    except Exception:
+        return "0.8"
+
+
 def _build_af3_env(parent_env) -> dict[str, str]:
     """Build the child environment for ``run_alphafold.py`` with the XLA memory cap.
 
@@ -352,7 +424,8 @@ def _build_af3_env(parent_env) -> dict[str, str]:
     silently no-ops is exactly the whole-box reboot this guard exists to prevent.  An
     inherited ``XLA_CLIENT_MEM_FRACTION`` is forwarded (not discarded) so the operator's
     intent survives the rename.  Precedence: ``AF3_XLA_MEM_FRACTION`` >
-    ``XLA_CLIENT_MEM_FRACTION`` > ``XLA_PYTHON_CLIENT_MEM_FRACTION`` > default 0.8.
+    ``XLA_CLIENT_MEM_FRACTION`` > ``XLA_PYTHON_CLIENT_MEM_FRACTION`` > a pool-aware
+    default (see ``_default_mem_fraction``; was a hard-coded 0.8, which rebooted BM5).
 
     Revisit if a jax upgrade ever drops the legacy name — see docs/PLAN_af3_v304_upgrade.md.
     """
@@ -362,7 +435,7 @@ def _build_af3_env(parent_env) -> dict[str, str]:
     inherited_legacy = (parent_env.get("XLA_PYTHON_CLIENT_MEM_FRACTION") or "").strip()
     explicit = (parent_env.get("AF3_XLA_MEM_FRACTION") or "").strip()
 
-    mem_fraction = explicit or inherited_new or inherited_legacy or "0.8"
+    mem_fraction = explicit or inherited_new or inherited_legacy or _default_mem_fraction()
     env["XLA_PYTHON_CLIENT_MEM_FRACTION"] = mem_fraction
     # Drop the newer name so the two can never both be present in the child.
     env.pop("XLA_CLIENT_MEM_FRACTION", None)
