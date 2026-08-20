@@ -141,6 +141,8 @@ def refold_batch(
             writer.writeheader()
             fh.flush()
 
+        n_failed = 0
+        first_exc: Exception | None = None
         for idx, binder_seq in jobs:
             binder_len = len(binder_seq)
             target_len = len(target_sequence)
@@ -161,6 +163,8 @@ def refold_batch(
                 )
             except Exception as exc:
                 print(f"[af3] ERROR on binder #{idx}: {exc}")
+                n_failed += 1
+                first_exc = first_exc or exc
                 row = _empty_row(idx, binder_seq, target_sequence)
                 writer.writerow(row)
                 fh.flush()
@@ -168,6 +172,7 @@ def refold_batch(
 
             if af3_out is None:
                 print(f"[af3] No output found for binder #{idx}")
+                n_failed += 1
                 row = _empty_row(idx, binder_seq, target_sequence)
                 writer.writerow(row)
                 fh.flush()
@@ -234,6 +239,21 @@ def refold_batch(
             fh.flush()
 
     print(f"[af3] Wrote {len(jobs)} row(s) → {csv_path}")
+
+    # Failing EVERY binder is an environment fault, not bad input, and it must not
+    # exit 0. Mirrors the same guard in refold_boltz2.py. Without this, AF3 wrote a
+    # full set of empty rows, evaluate.sh returned 0, and the report was generated
+    # with AF3 silently absent -- which also silently defeats the >=3-engine gate,
+    # because every design then looks like a 2-engine design.
+    # Observed 2026-08-20: JAX_PLATFORMS=cpu was exported by evaluate.sh on
+    # aarch64, so run_alphafold.py could not see the GPU and all 6/6 binders died.
+    if jobs and n_failed == len(jobs):
+        raise RuntimeError(
+            f"All {len(jobs)} binder(s) failed — AF3 produced no usable output. "
+            f"This is an environment fault, not bad input. First error: {first_exc}. "
+            "Common cause: JAX cannot see the GPU (check JAX_PLATFORMS is not set to "
+            "'cpu'), or the AF3 model weights / run_alphafold.py are missing."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +347,10 @@ def _run_single(
     print(f"  [af3] Running: {Path(cmd[1]).name} (XLA mem fraction {af3_env['XLA_PYTHON_CLIENT_MEM_FRACTION']}) ...")
     result = subprocess.run(cmd, capture_output=True, text=True, env=af3_env)
     if result.returncode != 0:
-        print(f"  [af3] STDERR: {result.stderr[-500:]}" if result.stderr else "  [af3] No stderr")
+        # 4000, not 500: a 500-char tail cut the head off every traceback, which is
+        # exactly where the cause lives. The JAX "Unknown backend: 'gpu'" failure was
+        # unreadable for that reason -- the log showed a severed path fragment.
+        print(f"  [af3] STDERR: {result.stderr[-4000:]}" if result.stderr else "  [af3] No stderr")
         raise RuntimeError(f"AF3 exited with code {result.returncode}")
 
     # Find the top-ranked output
@@ -399,7 +422,7 @@ def _default_mem_fraction() -> str:
         if unified:
             frac = min(frac, max(0.0, (pool_gib - _AF3_MIN_OS_GIB) / pool_gib))
         else:
-            frac = max(frac, 0.5)      # discrete: keep plenty of card for big complexes
+            frac = max(frac, 0.5)  # discrete: keep plenty of card for big complexes
         frac = max(0.02, min(frac, 0.8))
         return f"{frac:.3f}"
     except Exception:

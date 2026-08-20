@@ -69,9 +69,22 @@ for _conda_sh in \
     [[ -f "$_conda_sh" ]] && { source "$_conda_sh"; break; }
 done
 
-# aarch64/Blackwell: set env vars for JAX and PyTorch CUDA compilation
+# aarch64/Blackwell: PyTorch CUDA compilation target.
+#
+# `export JAX_PLATFORMS=cpu` used to live here (added 2026-04-07 in 3cd03c5 as an
+# aarch64 "platform guard", copied from PXDesign where JAX-on-sm_121 genuinely
+# failed at the time).  It was WRONG for the Evaluator and silently broke it for
+# ~4.5 months: JAX_PLATFORMS=cpu hides the GPU from every JAX child, so
+#   * Boltz-2 ran on CPU -- correct numbers, ~2.7x slower, and it says nothing;
+#   * AF3 died on EVERY binder with "Unknown backend: 'gpu' requested, but no
+#     platforms that are instances of gpu are present", wrote empty rows, and
+#     still exited 0 -- silently removing a whole engine from consensus_iptm_mean
+#     and from the >=3-engine gate.
+# Measured 2026-08-20 on BM5: with it unset both engines report ['gpu'] and fold
+# correctly (AF3 iptm 0.8900, Boltz-2 17.2 GiB on-GPU).  Do not re-add it.
+# A machine that genuinely cannot run JAX on GPU can still export it externally;
+# evaluate.sh inherits the environment.
 if [[ "$(uname -m)" == "aarch64" ]]; then
-    export JAX_PLATFORMS=cpu
     export TORCH_CUDA_ARCH_LIST="12.0"
 fi
 
@@ -217,6 +230,7 @@ BOLTZ2_CSV="$OUTPUT/boltz2_results.csv"
 AF3_CSV="$OUTPUT/af3_results.csv"
 ESMFOLD2_CSV="$OUTPUT/esmfold2_results.csv"
 SOLUPROT_CSV="$OUTPUT/soluprot_results.csv"
+SOLUPROT_OK=1   # cleared if the optional screen fails; see Step 0.5
 
 # Step counter: 1 (report) + 1 per engine not skipped + 1 if SoluProt ran
 N_STEPS=1  # report
@@ -241,10 +255,26 @@ if [[ $SKIP_SOLUPROT -eq 0 ]]; then
     # needs py3.10+ — so we cannot run binder-compare inside ${SOLUPROT_ENV}.
     SOLUPROT_PYTHON="$(conda run -n "${SOLUPROT_ENV}" python -c 'import sys; print(sys.executable)' 2>/dev/null)"
     export SOLUPROT_PYTHON
-    conda run -n binder-eval binder-compare filter-soluprot \
-        --sequences "$SEQUENCES" \
-        -o          "$SOLUPROT_CSV" \
-        --threshold "$SOLUPROT_THRESHOLD"
+    # SoluProt is an OPTIONAL pre-screen, so a failure must not take the whole
+    # evaluation down with it (it did: a missing USEARCH binary aborted the run
+    # before any refold engine started).  The one exception is --soluprot-filter:
+    # that flag changes WHICH sequences get refolded, so silently continuing
+    # would produce a different pool than was asked for.
+    if conda run -n binder-eval binder-compare filter-soluprot \
+            --sequences "$SEQUENCES" \
+            -o          "$SOLUPROT_CSV" \
+            --threshold "$SOLUPROT_THRESHOLD"; then
+        SOLUPROT_OK=1
+    else
+        SOLUPROT_OK=0
+        if [[ $SOLUPROT_FILTER -eq 1 ]]; then
+            echo "Error: --soluprot-filter was requested but the SoluProt screen failed." >&2
+            echo "       Continuing would refold a DIFFERENT pool than you asked for." >&2
+            exit 1
+        fi
+        echo "[soluprot] WARNING: screen failed — continuing WITHOUT the solubility" >&2
+        echo "[soluprot]          column. Refolding is unaffected. See the error above." >&2
+    fi
 
     if [[ $SOLUPROT_FILTER -eq 1 ]]; then
         # Hard filter: rewrite the FASTA, keeping only sequences whose
@@ -462,7 +492,7 @@ fi
 if [[ $SKIP_ESMFOLD2 -eq 0 && -f "$ESMFOLD2_CSV" ]]; then
     REPORT_ARGS+=(--esmfold2-results "$ESMFOLD2_CSV")
 fi
-if [[ $SKIP_SOLUPROT -eq 0 && -f "$SOLUPROT_CSV" ]]; then
+if [[ $SKIP_SOLUPROT -eq 0 && $SOLUPROT_OK -eq 1 && -f "$SOLUPROT_CSV" ]]; then
     REPORT_ARGS+=(--soluprot-results "$SOLUPROT_CSV")
 fi
 REPORT_ARGS+=(--primary-engine "$PRIMARY_ENGINE")
