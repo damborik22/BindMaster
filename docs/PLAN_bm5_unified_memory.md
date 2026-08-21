@@ -165,14 +165,31 @@ active (exit 2), because concurrency without a hard per-client cap is the config
 that took the box down.  Signal traps (INT/TERM as well as EXIT) tear MPS down if the
 script is killed — without them a `timeout` left the daemon holding machine-wide state.
 
-**HONEST LIMIT — the throughput benefit is NOT demonstrated.**  That test used a
-1-binder pool, where the run is dominated by host-side model loading and JAX compile:
-GPU occupancy exceeded 1 GiB for only **42 s of a 480 s run**, and the engines finished
-six minutes apart.  With a pool that small the 30 s stagger is longer than the overlap
-window, so the engines effectively serialise.  What is demonstrated is **safety**, not
-speed.  On a realistic pool (tens of binders) each engine's GPU phase is long and a 30 s
-stagger is negligible — but that has not been measured.  Do that before relying on
-`--concurrent` for throughput.
+**Throughput ANSWERED 2026-08-21** (6 PD-L1 binders, 300-340 tokens, on commit a91f595
+i.e. after the JAX_PLATFORMS fix; concurrent arm ran first with cold caches, so the
+figure is a lower bound):
+
+| arm | wall | min MemAvailable | peak GPU | NVRM | engines valid |
+|---|---|---|---|---|---|
+| staggered-concurrent | **855 s** | 39.9 GiB | 56,067 MiB | 0 | all |
+| sequential | **1066 s** | 86.3 GiB | 24,864 MiB | 0 | all |
+
+**`--concurrent` is worth 1.25x — a 19.8% saving — and costs 54% of the OS headroom.**
+GPU utilisation is 97% / 94%: both arms are genuinely GPU-bound.  Perfect parallelism
+would be 565 s (1.9x), so contention absorbs most of the theoretical gain; the ceiling
+is Boltz-2, which alone is 47% of the sequential total.
+
+Use it when BM5 is dedicated to the refold.  Do NOT use it when anything else needs the
+box: halving headroom to save 3.5 minutes on a 6-binder pool is a bad trade, and 39.9 GiB
+is the tightest floor measured at these caps.
+
+> The earlier 1-binder reading in this plan — "GPU occupancy 42 s of 480 s, the engines
+> effectively serialise, the workload is CPU-bound" — was **wrong, and wrong for a
+> reason worth remembering**: `evaluate.sh` was exporting `JAX_PLATFORMS=cpu`, so both
+> JAX engines ran on CPU and AF3 produced nothing at all.  The measurement was of a
+> broken pipeline.  See the 2026-08-21 commit a91f595.
+
+Raw data: `docs/data/bm5_unified_memory_2026-08-20/throughput_ab_2026-08-21/`.
 
 ### Numerics under MPS — gate PASSED
 
