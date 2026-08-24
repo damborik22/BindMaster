@@ -1531,3 +1531,135 @@ use the `run_stepE[.]sh` bracket trick so the pattern text differs from what it 
 read the survivor rate off the first ~6,000 first. Round-2 E2 counter-screen finishes ~08-17 06:00
 (monitor the PDB count in `cs_E2/struct/`; this arm's CSV is not written incrementally). Whether the
 round-2 report should carry a composition column so this cannot recur silently is a live decision.
+
+---
+
+## 2026-08-19 → 08-21 — **The GPU pool on GB10 *is* system RAM**: two reboots were reservation, not demand; and `JAX_PLATFORMS=cpu` had been silently deleting AF3 from every aarch64 run for 4.5 months
+
+**What changed:**
+
+- **The mechanism behind two hard reboots, settled.** `cudaMemGetInfo` on GB10 returns
+  total == `SC_PHYS_PAGES` == **121.69 GiB** — there is no device. Every allocator knob in
+  JAX and PyTorch is *a fraction of device total*, so on this box they are fractions of the
+  whole machine:
+
+  | incident | knob | fraction × 121.7 GiB | reserved | OS left | outcome |
+  |---|---|---|---|---|---|
+  | 2026-08-18 AF3 | hard-coded `0.8` | 97.4 GiB | 99,960 MiB | ~24 GB | 17 min of `NVRM: NV_ERR_NO_MEMORY` → **hard reboot**, 22 d uptime lost |
+  | 2026-08-19 Boltz-2 | none set → JAX default `0.75` | 91.3 GiB | 93,802 MiB | ~30 GB | caught before cascade |
+
+  Both match the arithmetic to within 0.3 %. **Neither ran out of memory.** On unified
+  memory a 91 GiB request is *granted* — out of the kernel's pocket — instead of refused as
+  it would be on a card. It looks like success right up until sshd and the driver discover
+  their RAM is gone.
+
+- **cgroups do not contain NVIDIA allocations.** Measured: 12,288 MiB of `cudaMalloc` inside
+  a scope with `memory.max=8 GiB` succeeded; `memory.current` rose 5 → 92 MiB (+0.7 %),
+  `memory.events` `max 0`. Root cause found in NVIDIA's own source — the driver only wires up
+  the `dmem` cgroup controller from **610.43.02**; on 580.x `os_dmem_cgroup_try_charge()`
+  compiles to a stub returning `NV_OK`. This also explains why the kernel OOM killer never
+  saved the box: 97 GB is consumed and attributed to *nobody*, so it cannot pick a culprit.
+
+- **CUDA MPS per-client limits *do* enforce, and no published source reports this verified on
+  GB10.** `set_default_device_pinned_mem_limit` refused a 4 GiB alloc under a 2 GiB cap;
+  JAX computed `bytes_limit=91.27 GiB` (still wrong) but was physically truncated to
+  `pool_bytes=7.28 GiB`; exceeding the cap gives a clean `RESOURCE_EXHAUSTED`. Shipped as
+  `tools/gpu_mem_guard.sh` (`verify` / `start` / `stop` / `status` / `run` / `watch`).
+
+- **Demand measured, caps set from it.** At 340 tokens: AF3 **7,759 MiB**, Boltz-2
+  **17,187 MiB**, ESMFold2 **18,369 MiB**. Boltz-2 is **flat** across our regime — 273 and
+  340 tokens peak identically — so cost is fixed, not N². Caps at ~1.4–1.5×: **12 / 24 / 24 GiB**.
+  Above ~600 tokens Boltz-2 needs >56 GiB and does not fit; **the 869-token EGFR complex that
+  force-rebooted this box in June now returns a clean `RESOURCE_EXHAUSTED` with the machine
+  untouched.**
+
+- **Numerics gate passed.** AF3 is bit-identical under MPS and without. Boltz-2 and ESMFold2
+  differ only within their own run-to-run spread (**0.00096** and **0.0042** on iptm), which
+  same-config controls established is baseline nondeterminism, not the cap. *Two of the three
+  refold engines are nondeterministic run-to-run* — differences below those magnitudes in
+  `consensus_iptm_mean` are noise.
+
+- **Firmware EC `0x03000508` + SoC `0x02009b0b` applied** (NVIDIA's LVFS channel); driver and
+  kernel deliberately **held** at 580.159.03 / 6.17.0-1026, because 580.173.02 has two open
+  regression reports and the exact kernel+driver pair `apt` offered is the environment in an
+  unresolved hard-freeze bug. Post-update: enforcement PASS, `cudaMemGetInfo` total **still**
+  == system RAM. **The firmware did not fix the root cause and no release ever claimed to** —
+  NVIDIA's OOM work was already in 580.159.03 and is worded "adds user feedback", not
+  "prevents hangs".
+
+**The finding that mattered more than the one we went looking for:**
+
+- `evaluate.sh` exported **`JAX_PLATFORMS=cpu`** on aarch64 — added 2026-04-07 in `3cd03c5` as
+  a "platform guard", copied from PXDesign where JAX-on-sm_121 genuinely failed at the time.
+  It was wrong for the Evaluator and broke it silently for **~4.5 months**:
+
+  ```
+  JAX_PLATFORMS unset  ->  Mosaic venv ['gpu'],  binder-eval-af3 ['gpu']
+  JAX_PLATFORMS=cpu    ->  both ['cpu']
+  ```
+
+  - **Boltz-2 ran on CPU** — correct numbers, ~2.7× slower, and it never said so.
+  - **AF3 died on every binder** (`Unknown backend: 'gpu' requested`), wrote a full set of
+    **empty rows**, and **exited 0** — so the pipeline reported success and rendered a report
+    with AF3 contributing nothing.
+
+- **This silently defeats the ≥3-engine gate.** Every design looks like a 2-engine design, so
+  the pool either fails the gate wholesale or is ranked on a `consensus_iptm_mean` that
+  quietly excludes AF3 — with nothing anywhere objecting. Same shape as the composition
+  collapse of 2026-08-16: every guard we have is a *structure-confidence* guard, and none of
+  them notices an engine that simply is not there. x86 was never affected; any Spark-class
+  node on `master` still is.
+
+**Recurrence guards (arguably the point):**
+
+- AF3 now **raises when every binder fails**, mirroring the guard `refold_boltz2.py` already
+  had, instead of exiting 0 with empty rows.
+- AF3 child stderr was logged as `stderr[-500:]`, which severed the head off every traceback —
+  the reason this error was unreadable for months. Now 4000.
+- SoluProt is no longer fatal to the whole evaluation, **except under `--soluprot-filter`**,
+  which changes *which* sequences get refolded.
+- The A/B harness now validates per-engine output rows rather than trusting `rc=0`.
+
+**SoluProt:** `2ae1bdb` removed the committed USEARCH binaries (GPLv3 in an MIT repo) and moved
+the job to the installer. **Machines whose install predates that commit lost the binary on
+their next pull and never rebuilt it** — BM5 was one, and **BM1/BM2/BM4 will be too**;
+`bindmaster install --tool soluprot` fixes them. A resolver returning `None` turned the missing
+file into `Path to USEARCH is invalid: None` and killed the run before any refold started.
+
+**Throughput, once the engines were actually on the GPU:**
+
+| arm | wall | min MemAvailable | peak GPU | NVRM |
+|---|---|---|---|---|
+| staggered-concurrent | **855 s** | 39.9 GiB | 56,067 MiB | 0 |
+| sequential | **1066 s** | 86.3 GiB | 24,864 MiB | 0 |
+
+`--concurrent` is worth **1.25× (19.8 %)** and costs **54 % of the OS headroom** — use it only
+when BM5 is dedicated. Perfect parallelism would be 1.9×; contention absorbs the rest, and the
+ceiling is Boltz-2 at 47 % of the sequential total.
+
+**The mistakes:**
+
+- **I called a run successful on `rc=0` and a rendered report, without checking that AF3
+  produced values.** The 1-binder `--concurrent` test on 08-20 "passed" that way; AF3 was
+  almost certainly already empty. This is the *same* lesson as the Mosaic 512/512-skipped
+  incident and the "REPRO2 ALL DONE" pipeline — check per-arm output, never the tail of the
+  log — and it cost a full 45-minute A/B that had to be discarded and re-run.
+- **A `pkill -f <pattern>` matched my own shell's command line and killed the launcher —
+  twice in one day** (`nvidia-cuda-mps`, then `bm5_throughput_test/ab.sh`), both surfacing as
+  a bare exit 144. Find PIDs with `ps`+`awk` and kill those; keep the kill in a different
+  command from the launch.
+- **`pid=$(sample_start …)` hung forever**: command substitution blocks until every writer to
+  that stdout pipe exits, and the backgrounded sampler loops forever. Redirect the loop's
+  stdout. A sibling of the same bug (`wait` waiting on the sampler) had already cost one run.
+- **An interim conclusion — "the engines are CPU-bound, concurrency cannot help" — was
+  confidently wrong**, because it measured a pipeline in which both JAX engines were on CPU.
+  Corrected in place in `PLAN_bm5_unified_memory.md` rather than deleted.
+
+**Outcome:**
+- 4 commits on `af3/24gb-and-compile-cache`, PR #38. Raw data for every number above under
+  `docs/data/bm5_unified_memory_2026-08-20/`.
+- **BM5 has now been up 4 days with zero NVRM errors**, spanning the firmware update and ~2 h
+  of heavy GPU work including the complex that used to force-reboot it. Before this it
+  rebooted itself twice in a week.
+- Still open, all needing root: `earlyoom`, sshd `OOMScoreAdjust=-1000`, and removing the
+  stale bioconda `usearch` (confirmed broken on aarch64) from `binder-eval-soluprot/bin/`.
