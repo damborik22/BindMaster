@@ -1622,8 +1622,23 @@ round-2 report should carry a composition column so this cannot recur silently i
 
 **SoluProt:** `2ae1bdb` removed the committed USEARCH binaries (GPLv3 in an MIT repo) and moved
 the job to the installer. **Machines whose install predates that commit lost the binary on
-their next pull and never rebuilt it** — BM5 was one, and **BM1/BM2/BM4 will be too**;
-`bindmaster install --tool soluprot` fixes them. A resolver returning `None` turned the missing
+their next pull and never rebuilt it.**
+
+> **Fleet check, 2026-08-24 — my "BM1/BM2/BM4 will be too" was wrong, asserted without
+> probing.** Only **BM1** has the `binder-eval-soluprot` env at all; BM2 and BM4 do not,
+> and `evaluate.sh` auto-detects by env presence, so SoluProt never runs there. BM1 *was*
+> broken and had **two** independent faults: `binder-eval` was missing `requests`, so
+> `binder-compare` died before USEARCH was ever resolved, and `usearch.x86_64` was absent.
+> Both repaired; `filter-soluprot` verified end-to-end. **The x86 binary had to be built on
+> BM1 from source — BM5's `usearch.aarch64` is an ARM ELF and the resolver keys on
+> `platform.machine()`, so nothing can be copied between them.** Reassuringly, the same
+> sequence scores **0.823900 on both** BM5 (aarch64) and BM1 (x86_64) to six decimals, so
+> the source-built v12 + sklearn 0.20.4 pipeline is reproducible across architectures.
+> Two side-findings: BM1's checkout is on `master`, which lacks the `.gitignore` rule from
+> this branch, so the freshly built GPLv3 binary was *not* ignored there — added to
+> `.git/info/exclude` as a stopgap until PR #38 merges. And the fleet's eval envs have
+> drifted: BM1 still carries the retired `binder-eval-af2`, BM2 has no `binder-eval-esmfold2`
+> at all, BM4 does. A resolver returning `None` turned the missing
 file into `Path to USEARCH is invalid: None` and killed the run before any refold started.
 
 **Throughput, once the engines were actually on the GPU:**
